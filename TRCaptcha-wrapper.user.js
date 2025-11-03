@@ -5,7 +5,7 @@
 // @description  Notifies Discord/Telegram when a captcha appears and redirects after timer
 // @author       Team Rocket
 // @icon         https://i.ibb.co/RptK4TP5/teamrocketlogo.gif
-// @include      **tribalwars**
+// @include      https://*.tribalwars.com.pt/game.php*
 // @require      https://raw.githubusercontent.com/jpsilva95/TeamRocketTW/main/TRCaptcha-notifier.js
 // @updateURL    https://raw.githubusercontent.com/jpsilva95/TeamRocketTW/main/TRCaptcha-wrapper.user.js
 // @downloadURL  https://raw.githubusercontent.com/jpsilva95/TeamRocketTW/main/TRCaptcha-wrapper.user.js
