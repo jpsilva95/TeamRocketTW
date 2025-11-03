@@ -6,8 +6,8 @@
 // @author       TeamRocket
 // @icon         https://i.ibb.co/RptK4TP5/teamrocketlogo.gif
 // @include      **tribalwars**
-// @require      https://raw.githubusercontent.com/jpsilva95/TribalWarsDailiesTR/main/captcha-notifier.js
-// @updateURL    https://raw.githubusercontent.com/jpsilva95/TribalWarsDailiesTR/main/captcha-wrapper.user.js
-// @downloadURL  https://raw.githubusercontent.com/jpsilva95/TribalWarsDailiesTR/main/captcha-wrapper.user.js
+// @require      https://raw.githubusercontent.com/jpsilva95/TeamRocketTW/main/TRCaptcha-notifier.js
+// @updateURL    https://raw.githubusercontent.com/jpsilva95/TeamRocketTW/main/TRCaptcha-wrapper.user.js
+// @downloadURL  https://raw.githubusercontent.com/jpsilva95/TeamRocketTW/main/TRCaptcha-wrapper.user.js
 // @grant        none
 // ==/UserScript==
