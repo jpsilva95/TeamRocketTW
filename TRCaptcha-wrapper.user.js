@@ -12,4 +12,4 @@
 // @grant        none
 // ==/UserScript==
 
-//   © 2025 Team Rocket All Rights Reserved
+//   © 2025 Team Rocket. All Rights Reserved
