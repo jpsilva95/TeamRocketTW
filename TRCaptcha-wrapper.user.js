@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Team Rocket Captcha Discord and Telegram Notification with Timer
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Notifies Discord/Telegram when a captcha appears and redirects after timer
 // @author       Team Rocket
 // @icon         https://i.ibb.co/RptK4TP5/teamrocketlogo.gif
