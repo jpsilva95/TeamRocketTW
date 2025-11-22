@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Team Rocket Dailies
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  Send daily farm and resource stats to Discord webhook
 // @author       Team Rocket©
 // @icon         https://i.ibb.co/RptK4TP5/teamrocketlogo.gif
