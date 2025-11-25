@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TeamRocket Dailies Obfuscated v2.9
 // @namespace    http://tampermonkey.net/
-// @version      3.5
+// @version      3.6
 // @description  Send daily farm, resource stats, and troop counts to Discord
 // @author       TeamRocket
 // @match        https://*.tribalwars.com.pt/game.php*
