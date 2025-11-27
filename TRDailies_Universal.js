@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mystery Inc. Dailies (Clean Version)
 // @namespace    http://tampermonkey.net/
-// @version      4.1
+// @version      4.2
 // @description  Send daily farm, resource stats, and troop counts to Discord (Hides 0 troop counts)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -15,8 +15,31 @@
 (function() {
     'use strict';
 
+    // -------------------------------
+    // Runtime detection & bookmarklet reinjection guard
+    // -------------------------------
+    const IS_TAMPERMONKEY = (typeof GM_info !== 'undefined') || (typeof GM_xmlhttpRequest !== 'undefined');
+
+    // If running as a bookmarklet (not TM), prevent multiple reinjections on same page.
+    // We early-return to avoid redefining classes / timers.
+    if (!IS_TAMPERMONKEY) {
+        if (window.__twDailyBookmarkletLoaded) {
+            console.log('Mystery Inc: Bookmarklet already active — aborting reinjection.');
+            return;
+        }
+        window.__twDailyBookmarkletLoaded = true;
+    }
+
+    // Ensure page-level scheduler object exists (used for bookmarklet and as safety in TM)
+    window.__twDailyScheduler = window.__twDailyScheduler || {
+        timeoutId: null,
+        intervalId: null,
+        active: false,
+        inProgress: false
+    };
+
     const CONFIG = {
-        ver: '4.1',
+        ver: '4.2',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -145,6 +168,9 @@
                 if (autoCheck.checked) {
                     localStorage.setItem(CONFIG.keys.autoTime, autoTime.value);
                     this.initAutoScheduler();
+                } else {
+                    // if disabling, clear page-level scheduler (safe on both TM and bookmarklet)
+                    this.clearPageScheduler();
                 }
             };
 
@@ -364,6 +390,14 @@
         // --- DISCORD SENDING ---
 
         async sendToDiscord(webhookUrl, stats, statusElement) {
+            // If the page-level inProgress flag is set, skip (protect from concurrent sends on same page)
+            if (window.__twDailyScheduler.inProgress) {
+                if (statusElement) statusElement.innerHTML = '<span style="color: #ED4245;">❌ Send already in progress on this page</span>';
+                throw new Error('Send already in progress on this page');
+            }
+
+            window.__twDailyScheduler.inProgress = true;
+
             const fields = [
                 { name: 'Player', value: '👤 ' + (stats.playerName || 'Unknown'), inline: false },
                 { name: 'World', value: '🌍 ' + (stats.world || 'Unknown'), inline: false },
@@ -402,15 +436,16 @@
                 }]
             });
 
+            const finalize = (success) => {
+                window.__twDailyScheduler.inProgress = false;
+                if (success) {
+                    if (statusElement) statusElement.innerHTML = '<span style="color: #57F287;">✅ Successfully sent to Discord!</span>';
+                }
+            };
+
             return new Promise((resolve, reject) => {
-                const handleSuccess = () => {
-                     if (statusElement) statusElement.innerHTML = '<span style="color: #57F287;">✅ Successfully sent to Discord!</span>';
-                     resolve();
-                };
-                const handleError = (msg) => {
-                     if (statusElement) statusElement.innerHTML = `<span style="color: #ED4245;">❌ ${msg}</span>`;
-                     reject(new Error(msg));
-                };
+                const handleSuccess = () => { finalize(true); resolve(); };
+                const handleError = (msg) => { finalize(false); if (statusElement) statusElement.innerHTML = `<span style="color: #ED4245;">❌ ${msg}</span>`; reject(new Error(msg)); };
 
                 if (typeof GM_xmlhttpRequest !== 'undefined') {
                     GM_xmlhttpRequest({
@@ -423,7 +458,8 @@
                     });
                 } else {
                     fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload })
-                    .then(handleSuccess).catch(e => handleError(e.message));
+                    .then(() => handleSuccess())
+                    .catch(e => handleError(e.message));
                 }
             });
         }
@@ -432,9 +468,7 @@
 
         parseNumber(str) {
             if (!str) return 0;
-            // Handle cases where input is already a number
             if (typeof str === 'number') return str;
-            // Removes spaces, dots, keeps digits
             return parseInt(str.replace(/\s/g, '').replace(/\./g, '').replace(/[^\d]/g, '')) || 0;
         }
 
@@ -444,62 +478,158 @@
 
         // --- AUTO SCHEDULER ---
 
+        // Clears page-level timers (safe to call from both bookmarklet and TM)
+        clearPageScheduler() {
+            try {
+                if (window.__twDailyScheduler.timeoutId) {
+                    clearTimeout(window.__twDailyScheduler.timeoutId);
+                    window.__twDailyScheduler.timeoutId = null;
+                }
+                if (window.__twDailyScheduler.intervalId) {
+                    clearInterval(window.__twDailyScheduler.intervalId);
+                    window.__twDailyScheduler.intervalId = null;
+                }
+                window.__twDailyScheduler.active = false;
+            } catch (e) {
+                console.error('Error clearing page scheduler', e);
+            }
+        }
+
         initAutoScheduler() {
             const enabled = localStorage.getItem(CONFIG.keys.autoEnabled) === 'true';
             const time = localStorage.getItem(CONFIG.keys.autoTime) || '23:00';
             const webhook = localStorage.getItem(CONFIG.keys.webhook);
 
-            if (!enabled || !webhook) return;
+            if (!enabled || !webhook) {
+                // if auto disabled, clear any page-level timers
+                this.clearPageScheduler();
+                return;
+            }
+
+            // If bookmarklet: avoid creating multiple schedulers per page
+            if (!IS_TAMPERMONKEY) {
+                if (window.__twDailyScheduler.active) {
+                    console.log('Bookmarklet: scheduler already active - skipping init.');
+                    return;
+                }
+            }
+
+            // Always clear any previous timers (safe on both TM and bookmarklet).
+            this.clearPageScheduler();
+
             const now = new Date();
+            // compute delay until the start of next minute boundary so intervals align to minutes
             const delay = (60 - now.getSeconds()) * 1000;
 
-            setTimeout(() => {
+            // Set page-level timeout and interval and mark active
+            window.__twDailyScheduler.timeoutId = setTimeout(() => {
+                // Run check now, then set up 60s interval
                 this.checkAutoSend(time, webhook);
-                setInterval(() => this.checkAutoSend(time, webhook), 60000);
+                window.__twDailyScheduler.intervalId = setInterval(() => this.checkAutoSend(time, webhook), 60000);
             }, delay);
+
+            window.__twDailyScheduler.active = true;
+            console.log('Auto scheduler initialized (active:', window.__twDailyScheduler.active, ')');
         }
 
+        /**
+         * checkAutoSend
+         * - targetTime: "HH:MM"
+         * - webhook: webhook url
+         *
+         * Locks:
+         * - Uses localStorage intent/sending/sent markers to coordinate across tabs (Tampermonkey scenario)
+         * - Uses page-level inProgress flag to avoid concurrent sends on same page
+         */
         async checkAutoSend(targetTime, webhook) {
-            const now = new Date();
-            const currentTimeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
-            const dateStr = now.toDateString();
-            const uniqueKey = `${dateStr}_${targetTime}`;
-
-            if (currentTimeStr !== targetTime) return;
-            if (localStorage.getItem(CONFIG.keys.sentMarker) === uniqueKey) { console.log('Stats already sent today.'); return; }
-
-            const tabId = 'tab_' + Date.now() + Math.random();
-            const nonce = Date.now() + Math.random();
-            
-            localStorage.setItem(CONFIG.keys.intentMarker, JSON.stringify({ key: uniqueKey, tabId, nonce, timestamp: Date.now() }));
-            await new Promise(r => setTimeout(r, Math.random() * 500 + 100));
-
-            const currentIntent = JSON.parse(localStorage.getItem(CONFIG.keys.intentMarker) || '{}');
-            if (currentIntent.nonce !== nonce) return;
-
-            localStorage.setItem(CONFIG.keys.sendingMarker, JSON.stringify({ key: uniqueKey, tabId, nonce }));
-            await new Promise(r => setTimeout(r, 200));
-
-            const currentSending = JSON.parse(localStorage.getItem(CONFIG.keys.sendingMarker) || '{}');
-            if (currentSending.nonce !== nonce) return;
-
-            console.log('This tab is sending the daily stats...');
-            localStorage.setItem(CONFIG.keys.sentMarker, uniqueKey);
-
             try {
-                const stats = await this.gatherStats();
-                const hookId = webhook.split('/').pop();
-                const savedName = localStorage.getItem(`tw_player_name_${stats.world}_${hookId}`);
-                if (savedName) stats.playerName = savedName;
+                const now = new Date();
+                const currentTimeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 
-                await this.sendToDiscord(webhook, stats, null);
-                console.log('Auto-send success');
+                // Parse target time to a Date for a better window check
+                const [th, tm] = (targetTime || '23:00').split(':').map(v => parseInt(v, 10));
+                const target = new Date(now);
+                target.setHours(th, tm, 0, 0);
+
+                // Only proceed if we're within the target minute window (0 <= delta < 60s)
+                const deltaMs = now - target;
+                if (deltaMs < 0 || deltaMs >= 60000) {
+                    // Not in window - return
+                    return;
+                }
+
+                const dateStr = target.toDateString();
+                const uniqueKey = `${dateStr}_${targetTime}`;
+
+                // If already sent today according to localStorage, skip
+                if (localStorage.getItem(CONFIG.keys.sentMarker) === uniqueKey) {
+                    console.log('Stats already sent for', uniqueKey);
+                    return;
+                }
+
+                // Page-level in-progress guard (avoid concurrent sends on same page)
+                if (window.__twDailyScheduler.inProgress) {
+                    console.log('Page-level send already in progress, skipping this check.');
+                    return;
+                }
+
+                // Cross-tab intent negotiation (existing approach)
+                const tabId = 'tab_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                const nonce = Date.now() + Math.random();
+
+                localStorage.setItem(CONFIG.keys.intentMarker, JSON.stringify({ key: uniqueKey, tabId, nonce, timestamp: Date.now() }));
+                // small jitter so different tabs don't all race at the same instant
+                await new Promise(r => setTimeout(r, Math.random() * 500 + 100));
+
+                const currentIntent = JSON.parse(localStorage.getItem(CONFIG.keys.intentMarker) || '{}');
+                if (currentIntent.nonce !== nonce) {
+                    // Someone else took intent
+                    console.log('Lost intent to another tab');
+                    return;
+                }
+
+                localStorage.setItem(CONFIG.keys.sendingMarker, JSON.stringify({ key: uniqueKey, tabId, nonce }));
+                await new Promise(r => setTimeout(r, 200));
+
+                const currentSending = JSON.parse(localStorage.getItem(CONFIG.keys.sendingMarker) || '{}');
+                if (currentSending.nonce !== nonce) {
+                    // Someone else is sending
+                    console.log('Another tab is sending');
+                    return;
+                }
+
+                // This tab will send. Mark sentMarker optimistically only if send goes through successfully.
+                console.log('This tab will attempt to send daily stats:', tabId);
+
+                // Set page-level inProgress true to protect against concurrent sends on same page
+                window.__twDailyScheduler.inProgress = true;
+
+                try {
+                    const stats = await this.gatherStats();
+                    const hookId = webhook.split('/').pop();
+                    const savedName = localStorage.getItem(`tw_player_name_${stats.world}_${hookId}`);
+                    if (savedName) stats.playerName = savedName;
+
+                    // perform send
+                    await this.sendToDiscord(webhook, stats, null);
+
+                    // On success, record sentMarker so other tabs skip
+                    localStorage.setItem(CONFIG.keys.sentMarker, uniqueKey);
+                    console.log('Auto-send success for', uniqueKey);
+                } catch (sendErr) {
+                    console.error('Auto-send failed', sendErr);
+                    // don't set sentMarker; allow retries next day/minute
+                    localStorage.removeItem(CONFIG.keys.sentMarker);
+                    throw sendErr;
+                } finally {
+                    window.__twDailyScheduler.inProgress = false;
+                    // cleanup intent/sending markers
+                    localStorage.removeItem(CONFIG.keys.intentMarker);
+                    localStorage.removeItem(CONFIG.keys.sendingMarker);
+                }
+
             } catch (e) {
-                console.error('Auto-send failed', e);
-                localStorage.removeItem(CONFIG.keys.sentMarker);
-            } finally {
-                localStorage.removeItem(CONFIG.keys.intentMarker);
-                localStorage.removeItem(CONFIG.keys.sendingMarker);
+                console.error('checkAutoSend error', e);
             }
         }
     }
