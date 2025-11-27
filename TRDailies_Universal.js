@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mystery Inc. Dailies (Clean Version)
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      4.0
 // @description  Send daily farm, resource stats, and troop counts to Discord (De-obfuscated & Improved)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -16,7 +16,7 @@
     'use strict';
 
     const CONFIG = {
-        ver: '0.2',
+        ver: '4.0',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
