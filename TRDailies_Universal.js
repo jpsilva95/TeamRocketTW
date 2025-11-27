@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Mystery Inc. Dailies (Clean Version)
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  Send daily farm, resource stats, and troop counts to Discord (De-obfuscated & Improved)
+// @version      4.1
+// @description  Send daily farm, resource stats, and troop counts to Discord (Hides 0 troop counts)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -16,7 +16,7 @@
     'use strict';
 
     const CONFIG = {
-        ver: '4.0',
+        ver: '4.1',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -51,7 +51,6 @@
             if (lastVer !== CONFIG.ver) {
                 console.log(`New script version: ${CONFIG.ver} (was: ${lastVer})`);
                 localStorage.setItem(CONFIG.keys.version, CONFIG.ver);
-                // Clear locks on update
                 localStorage.removeItem(CONFIG.keys.sentMarker);
                 localStorage.removeItem(CONFIG.keys.sendingMarker);
                 localStorage.removeItem(CONFIG.keys.intentMarker);
@@ -63,7 +62,6 @@
         initUI() {
             if (document.getElementById('trDailiesBtn')) return;
 
-            // Try to find the Questlog (preferred spot)
             const questLog = document.querySelector('.questlog, #questlog_new, [id*="questlog"]');
             if (questLog) {
                 const container = document.createElement('div');
@@ -79,7 +77,6 @@
                 container.appendChild(btn);
                 questLog.appendChild(container);
             } else {
-                // Fallback to header info
                 const headerInfo = document.querySelector('#header_info');
                 if (headerInfo) {
                     const link = document.createElement('a');
@@ -101,7 +98,6 @@
             const modal = document.createElement('div');
             modal.style.cssText = 'background: #2C2F33; color: #DCDDDE; padding: 25px; border-radius: 8px; width: 550px; box-shadow: 0 8px 16px rgba(0,0,0,0.3); font-family: Arial, sans-serif;';
 
-            // Modal HTML
             modal.innerHTML = `
                 <h2 style="margin-top: 0; color: #5865F2;">📊 Send Daily Stats to Discord</h2>
                 <div style="margin-bottom: 15px;">
@@ -127,8 +123,6 @@
 
             overlay.appendChild(modal);
             document.body.appendChild(overlay);
-
-            // Logic for Modal Inputs
             this.setupModalLogic(overlay);
         }
 
@@ -140,13 +134,11 @@
             const sendBtn = document.getElementById('sendBtn');
             const closeBtn = document.getElementById('closeBtn');
 
-            // Load saved settings
             webhookInput.value = localStorage.getItem(CONFIG.keys.webhook) || '';
             autoCheck.checked = localStorage.getItem(CONFIG.keys.autoEnabled) === 'true';
             autoTime.value = localStorage.getItem(CONFIG.keys.autoTime) || '23:00';
             autoTime.disabled = !autoCheck.checked;
 
-            // Event Listeners
             autoCheck.onchange = () => {
                 autoTime.disabled = !autoCheck.checked;
                 localStorage.setItem(CONFIG.keys.autoEnabled, autoCheck.checked);
@@ -164,7 +156,6 @@
             closeBtn.onclick = () => document.body.removeChild(overlay);
             overlay.onclick = (e) => { if (e.target === overlay) document.body.removeChild(overlay); };
 
-            // Load Preview
             this.gatherStats().then(stats => {
                 this.renderPreview(stats, preview);
             }).catch(err => {
@@ -172,7 +163,6 @@
                 console.error(err);
             });
 
-            // Send Button
             sendBtn.onclick = async () => {
                 const url = webhookInput.value.trim();
                 const statusMsg = document.getElementById('statusMsg');
@@ -189,11 +179,9 @@
 
                 try {
                     const stats = await this.gatherStats();
-                    // Check for manual name override
                     const manualName = document.getElementById('manualPlayerName');
                     if (manualName && manualName.value.trim()) {
                         stats.playerName = manualName.value.trim();
-                        // Save name for this specific webhook
                         const hookId = url.split('/').pop();
                         localStorage.setItem(`tw_player_name_${stats.world}_${hookId}`, stats.playerName);
                     }
@@ -209,23 +197,27 @@
         }
 
         renderPreview(stats, container) {
-            let troopsHomeHtml = '';
-            if (Object.keys(stats.troopsHome).length > 0) {
-                troopsHomeHtml = '<p style="margin: 10px 0 5px 0; border-top: 1px solid #2C2F33; padding-top: 10px;"><strong>⚔️ Total Troops at Home:</strong></p>';
-                for (const [unit, data] of Object.entries(stats.troopsHome)) {
-                    if (data.count === 0) continue;
-                    troopsHomeHtml += `<p style="margin: 2px 0; padding-left: 20px; font-size: 13px;"><img src="${data.icon}" style="width: 18px; height: 18px; vertical-align: middle; margin-right: 4px;"> ${unit}: ${data.count}</p>`;
-                }
-            }
+            // Helper to generate HTML only for units > 0
+            const generateTroopHtml = (troopData, title) => {
+                let html = '';
+                let hasTroops = false;
+                
+                for (const [unit, data] of Object.entries(troopData)) {
+                    // Check if count is effectively > 0
+                    const countNum = this.parseNumber(data.count);
+                    if (countNum <= 0) continue;
 
-            let troopsScavHtml = '';
-            if (Object.keys(stats.troopsScavenging).length > 0) {
-                troopsScavHtml = '<p style="margin: 10px 0 5px 0; border-top: 1px solid #2C2F33; padding-top: 10px;"><strong>🔍 Total Troops Scavenging:</strong></p>';
-                for (const [unit, data] of Object.entries(stats.troopsScavenging)) {
-                    if (data.count === 0) continue;
-                    troopsScavHtml += `<p style="margin: 2px 0; padding-left: 20px; font-size: 13px;"><img src="${data.icon}" style="width: 18px; height: 18px; vertical-align: middle; margin-right: 4px;"> ${unit}: ${data.count}</p>`;
+                    if (!hasTroops) {
+                        html += `<p style="margin: 10px 0 5px 0; border-top: 1px solid #2C2F33; padding-top: 10px;"><strong>${title}</strong></p>`;
+                        hasTroops = true;
+                    }
+                    html += `<p style="margin: 2px 0; padding-left: 20px; font-size: 13px;"><img src="${data.icon}" style="width: 18px; height: 18px; vertical-align: middle; margin-right: 4px;"> ${unit}: ${data.count}</p>`;
                 }
-            }
+                return html;
+            };
+
+            const troopsHomeHtml = generateTroopHtml(stats.troopsHome, '⚔️ Total Troops at Home:');
+            const troopsScavHtml = generateTroopHtml(stats.troopsScavenging, '🔍 Total Troops Scavenging:');
 
             let nameInput = '';
             if (stats.playerName === 'Unknown') {
@@ -262,57 +254,39 @@
             const worldMatch = window.location.hostname.match(/^(\w+)\./);
             stats.world = worldMatch ? worldMatch[1].toUpperCase() : 'Unknown';
 
-            // 1. Fetch Player Name
             await this.fetchPlayerName(baseUrl, search, stats);
-
-            // 2. Fetch Loot (Farm) Stats
             await this.fetchLootStats(baseUrl, search, stats);
-
-            // 3. Fetch Scavenge Stats
             await this.fetchScavengeStats(baseUrl, search, stats);
 
-            // Calculate Grand Total
             if (stats.gatherTotal !== 'N/A' && stats.farmTotal !== 'N/A') {
                 const gather = this.parseNumber(stats.gatherTotal);
                 const farm = this.parseNumber(stats.farmTotal);
                 stats.grandTotal = this.formatNumber(gather + farm);
             }
 
-            // 4. Fetch Troop Counts (Scavenging Pages)
             await this.fetchTroopCounts(baseUrl, search, stats);
-
             return stats;
         }
 
         async fetchPlayerName(baseUrl, search, stats) {
             try {
-                // Try getting it from game_data global first
                 if (typeof game_data !== 'undefined' && game_data.player && game_data.player.name) {
                     stats.playerName = game_data.player.name;
                     return;
                 }
-
                 const response = await fetch(`${baseUrl}?${search.toString()}&screen=info_player`);
                 const html = await response.text();
                 const doc = new DOMParser().parseFromString(html, 'text/html');
-                
-                // Try multiple selectors
                 const selectors = [
                     'td.selected a[href*="screen=info_player"]',
                     'table.vis.modemenu td.selected a',
                     '#menu_row2 a[href*="screen=info_player"]:not([href*="id="])'
                 ];
-
                 for (let sel of selectors) {
                     const el = doc.querySelector(sel);
-                    if (el) {
-                        stats.playerName = el.textContent.trim();
-                        break;
-                    }
+                    if (el) { stats.playerName = el.textContent.trim(); break; }
                 }
-            } catch (e) {
-                console.error("Error fetching player name", e);
-            }
+            } catch (e) { console.error("Error fetching player name", e); }
         }
 
         async fetchLootStats(baseUrl, search, stats) {
@@ -320,12 +294,9 @@
                 const res = await fetch(`${baseUrl}?${search.toString()}&screen=ranking&mode=in_a_day&type=loot_res`);
                 const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
                 const content = doc.querySelector('#content_value');
-                
                 if (content) {
-                    const match = content.textContent.match(/O\s+meu\s+resultado\s+de\s+hoje:\s*([\d\s\.]+)/i); // Portuguese regex match
+                    const match = content.textContent.match(/O\s+meu\s+resultado\s+de\s+hoje:\s*([\d\s\.]+)/i);
                     if (match) stats.farmTotal = this.formatNumber(this.parseNumber(match[1]));
-                    
-                    // Detail extraction could go here if needed
                 }
             } catch (e) { console.error(e); }
         }
@@ -335,7 +306,6 @@
                 const res = await fetch(`${baseUrl}?${search.toString()}&screen=ranking&mode=in_a_day&type=scavenge`);
                 const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
                 const content = doc.querySelector('#content_value');
-                
                 if (content) {
                     const match = content.textContent.match(/O\s+meu\s+resultado\s+de\s+hoje:\s*([\d\s\.]+)/i);
                     if (match) stats.gatherTotal = this.formatNumber(this.parseNumber(match[1]));
@@ -346,67 +316,39 @@
         async fetchTroopCounts(baseUrl, search, stats) {
             let page = 0;
             let done = false;
-            
-            // Safety limit 20 pages
             while (!done && page < 20) {
                 const url = `${baseUrl}?${search.toString()}&screen=place&mode=scavenge_mass&page=${page}`;
                 const res = await fetch(url);
                 const text = await res.text();
-                
-                // Regex to find the JSON data in the JS on the page
                 const match = text.match(/ScavengeMassScreen[\s\S]*?(,\n *\[.*?\}{0,3}\],\n)/);
                 
-                if (!match || match.length <= 1) {
-                    done = true; 
-                    break;
-                }
-
-                // Clean up the JSON string to make it parseable
+                if (!match || match.length <= 1) { done = true; break; }
+                
                 let jsonStr = match[1];
                 jsonStr = jsonStr.substring(jsonStr.indexOf('['));
                 jsonStr = jsonStr.substring(0, jsonStr.length - 2);
 
                 try {
                     const villages = JSON.parse(jsonStr);
-                    if (villages.length === 0) {
-                        done = true;
-                        break;
-                    }
+                    if (villages.length === 0) { done = true; break; }
 
-                    // Process villages
                     villages.forEach(v => {
-                        // Backup name detection
                         if (stats.playerName === 'Unknown' && v.player_name) stats.playerName = v.player_name;
-
-                        // Count Home Troops
                         if (v.unit_counts_home) {
-                            for (const [unit, count] of Object.entries(v.unit_counts_home)) {
-                                this.addTroopCount(stats.troopsHome, unit, count);
-                            }
+                            for (const [unit, count] of Object.entries(v.unit_counts_home)) this.addTroopCount(stats.troopsHome, unit, count);
                         }
-
-                        // Count Scavenging Troops
                         if (v.options) {
                             Object.values(v.options).forEach(opt => {
                                 if (opt.scavenging_squad && opt.scavenging_squad.unit_counts) {
-                                    for (const [unit, count] of Object.entries(opt.scavenging_squad.unit_counts)) {
-                                        this.addTroopCount(stats.troopsScavenging, unit, count);
-                                    }
+                                    for (const [unit, count] of Object.entries(opt.scavenging_squad.unit_counts)) this.addTroopCount(stats.troopsScavenging, unit, count);
                                 }
                             });
                         }
                     });
-
-                } catch (jsonErr) {
-                    console.error("JSON Parse error on page " + page, jsonErr);
-                }
-
+                } catch (jsonErr) { console.error("JSON Parse error on page " + page, jsonErr); }
                 page++;
-                // Small delay to be polite to server
                 await new Promise(r => setTimeout(r, 200));
             }
-
-            // Format numbers at the end
             for (let key in stats.troopsHome) stats.troopsHome[key].count = this.formatNumber(stats.troopsHome[key].count);
             for (let key in stats.troopsScavenging) stats.troopsScavenging[key].count = this.formatNumber(stats.troopsScavenging[key].count);
         }
@@ -415,13 +357,7 @@
             if (unitCode === 'militia') return;
             const name = CONFIG.unitNames[unitCode];
             if (!name) return;
-
-            if (!storage[name]) {
-                storage[name] = { 
-                    count: 0, 
-                    icon: `${CONFIG.icons.units}unit_${unitCode}.png` 
-                };
-            }
+            if (!storage[name]) storage[name] = { count: 0, icon: `${CONFIG.icons.units}unit_${unitCode}.png` };
             storage[name].count += parseInt(count) || 0;
         }
 
@@ -439,26 +375,27 @@
             const formatTroopString = (troopObj) => {
                 let str = '';
                 for (const [name, data] of Object.entries(troopObj)) {
-                    const count = typeof data.count === 'string' ? this.parseNumber(data.count) : data.count;
-                    if (count > 0) str += `${name}: ${data.count}\n`;
+                    // PARSE NUMBER SAFELY TO CHECK FOR ZERO
+                    const numericCount = this.parseNumber(data.count);
+                    
+                    // ONLY SHOW IF > 0
+                    if (numericCount > 0) {
+                        str += `${name}: ${data.count}\n`;
+                    }
                 }
                 return str.trim();
             };
 
             const homeStr = formatTroopString(stats.troopsHome);
-            if (homeStr.length > 0 && homeStr.length < 1024) {
-                fields.push({ name: '⚔️ Troops at Home', value: homeStr, inline: false });
-            }
+            if (homeStr.length > 0 && homeStr.length < 1024) fields.push({ name: '⚔️ Troops at Home', value: homeStr, inline: false });
 
             const scavStr = formatTroopString(stats.troopsScavenging);
-            if (scavStr.length > 0 && scavStr.length < 1024) {
-                fields.push({ name: '🔍 Troops Scavenging', value: scavStr, inline: false });
-            }
+            if (scavStr.length > 0 && scavStr.length < 1024) fields.push({ name: '🔍 Troops Scavenging', value: scavStr, inline: false });
 
             const payload = JSON.stringify({
                 embeds: [{
                     title: '📊 Tribal Wars Daily Report',
-                    color: 5814783, // Discord Blurpleish
+                    color: 5814783,
                     fields: fields,
                     timestamp: new Date().toISOString(),
                     footer: { text: 'Mystery Inc Bot' }
@@ -470,7 +407,6 @@
                      if (statusElement) statusElement.innerHTML = '<span style="color: #57F287;">✅ Successfully sent to Discord!</span>';
                      resolve();
                 };
-
                 const handleError = (msg) => {
                      if (statusElement) statusElement.innerHTML = `<span style="color: #ED4245;">❌ ${msg}</span>`;
                      reject(new Error(msg));
@@ -482,21 +418,12 @@
                         url: webhookUrl,
                         headers: { 'Content-Type': 'application/json' },
                         data: payload,
-                        onload: (res) => {
-                            if (res.status >= 200 && res.status < 300) handleSuccess();
-                            else handleError(`Status ${res.status}: ${res.responseText}`);
-                        },
+                        onload: (res) => { if (res.status >= 200 && res.status < 300) handleSuccess(); else handleError(`Status ${res.status}: ${res.responseText}`); },
                         onerror: (err) => handleError('Network Error')
                     });
                 } else {
-                    // Fallback for non-Tampermonkey environments
-                    fetch(webhookUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: payload
-                    })
-                    .then(handleSuccess)
-                    .catch(e => handleError(e.message));
+                    fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload })
+                    .then(handleSuccess).catch(e => handleError(e.message));
                 }
             });
         }
@@ -505,6 +432,8 @@
 
         parseNumber(str) {
             if (!str) return 0;
+            // Handle cases where input is already a number
+            if (typeof str === 'number') return str;
             // Removes spaces, dots, keeps digits
             return parseInt(str.replace(/\s/g, '').replace(/\./g, '').replace(/[^\d]/g, '')) || 0;
         }
@@ -513,7 +442,7 @@
             return num.toLocaleString('pt-PT');
         }
 
-        // --- AUTO SCHEDULER (Complex Logic preserved for Tab Coordination) ---
+        // --- AUTO SCHEDULER ---
 
         initAutoScheduler() {
             const enabled = localStorage.getItem(CONFIG.keys.autoEnabled) === 'true';
@@ -521,8 +450,6 @@
             const webhook = localStorage.getItem(CONFIG.keys.webhook);
 
             if (!enabled || !webhook) return;
-
-            // Check every minute
             const now = new Date();
             const delay = (60 - now.getSeconds()) * 1000;
 
@@ -539,40 +466,28 @@
             const uniqueKey = `${dateStr}_${targetTime}`;
 
             if (currentTimeStr !== targetTime) return;
+            if (localStorage.getItem(CONFIG.keys.sentMarker) === uniqueKey) { console.log('Stats already sent today.'); return; }
 
-            // Check if already sent today
-            if (localStorage.getItem(CONFIG.keys.sentMarker) === uniqueKey) {
-                console.log('Stats already sent today.');
-                return;
-            }
-
-            // Race Condition Handling using LocalStorage
-            // This ensures if 5 tabs are open, only 1 sends the message
             const tabId = 'tab_' + Date.now() + Math.random();
             const nonce = Date.now() + Math.random();
             
-            // 1. Declare Intent
             localStorage.setItem(CONFIG.keys.intentMarker, JSON.stringify({ key: uniqueKey, tabId, nonce, timestamp: Date.now() }));
             await new Promise(r => setTimeout(r, Math.random() * 500 + 100));
 
-            // 2. Check if we won Intent
             const currentIntent = JSON.parse(localStorage.getItem(CONFIG.keys.intentMarker) || '{}');
-            if (currentIntent.nonce !== nonce) return; // Lost race
+            if (currentIntent.nonce !== nonce) return;
 
-            // 3. Promote to "Sending" status
             localStorage.setItem(CONFIG.keys.sendingMarker, JSON.stringify({ key: uniqueKey, tabId, nonce }));
             await new Promise(r => setTimeout(r, 200));
 
             const currentSending = JSON.parse(localStorage.getItem(CONFIG.keys.sendingMarker) || '{}');
-            if (currentSending.nonce !== nonce) return; // Lost race
+            if (currentSending.nonce !== nonce) return;
 
-            // 4. Execute Send
             console.log('This tab is sending the daily stats...');
-            localStorage.setItem(CONFIG.keys.sentMarker, uniqueKey); // Mark as sent immediately to block others
+            localStorage.setItem(CONFIG.keys.sentMarker, uniqueKey);
 
             try {
                 const stats = await this.gatherStats();
-                // Check for saved name override
                 const hookId = webhook.split('/').pop();
                 const savedName = localStorage.getItem(`tw_player_name_${stats.world}_${hookId}`);
                 if (savedName) stats.playerName = savedName;
@@ -581,17 +496,14 @@
                 console.log('Auto-send success');
             } catch (e) {
                 console.error('Auto-send failed', e);
-                // Clear sent marker so it tries again next minute or next tab
                 localStorage.removeItem(CONFIG.keys.sentMarker);
             } finally {
-                // Cleanup locks
                 localStorage.removeItem(CONFIG.keys.intentMarker);
                 localStorage.removeItem(CONFIG.keys.sendingMarker);
             }
         }
     }
 
-    // Initialize
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => new TwDailyStats());
     } else {
