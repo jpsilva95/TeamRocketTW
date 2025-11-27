@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (Clean Version)
+// @name         Mystery Inc. Dailies (Fixed Version)
 // @namespace    http://tampermonkey.net/
-// @version      4.2
-// @description  Send daily farm, resource stats, and troop counts to Discord (Hides 0 troop counts)
+// @version      4.3
+// @description  Send daily farm, resource stats, and troop counts to Discord (Hides 0 troop counts) - fixed scheduler locks
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -15,13 +15,10 @@
 (function() {
     'use strict';
 
-    // -------------------------------
-    // Runtime detection & bookmarklet reinjection guard
-    // -------------------------------
+    // Runtime detection
     const IS_TAMPERMONKEY = (typeof GM_info !== 'undefined') || (typeof GM_xmlhttpRequest !== 'undefined');
 
-    // If running as a bookmarklet (not TM), prevent multiple reinjections on same page.
-    // We early-return to avoid redefining classes / timers.
+    // Bookmarklet reinjection guard: only active when NOT Tampermonkey
     if (!IS_TAMPERMONKEY) {
         if (window.__twDailyBookmarkletLoaded) {
             console.log('Mystery Inc: Bookmarklet already active — aborting reinjection.');
@@ -30,7 +27,7 @@
         window.__twDailyBookmarkletLoaded = true;
     }
 
-    // Ensure page-level scheduler object exists (used for bookmarklet and as safety in TM)
+    // Page-level scheduler object (used for bookmarklet; harmless in TM)
     window.__twDailyScheduler = window.__twDailyScheduler || {
         timeoutId: null,
         intervalId: null,
@@ -39,7 +36,7 @@
     };
 
     const CONFIG = {
-        ver: '4.2',
+        ver: '4.3',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -223,13 +220,11 @@
         }
 
         renderPreview(stats, container) {
-            // Helper to generate HTML only for units > 0
             const generateTroopHtml = (troopData, title) => {
                 let html = '';
                 let hasTroops = false;
                 
                 for (const [unit, data] of Object.entries(troopData)) {
-                    // Check if count is effectively > 0
                     const countNum = this.parseNumber(data.count);
                     if (countNum <= 0) continue;
 
@@ -390,13 +385,14 @@
         // --- DISCORD SENDING ---
 
         async sendToDiscord(webhookUrl, stats, statusElement) {
-            // If the page-level inProgress flag is set, skip (protect from concurrent sends on same page)
-            if (window.__twDailyScheduler.inProgress) {
-                if (statusElement) statusElement.innerHTML = '<span style="color: #ED4245;">❌ Send already in progress on this page</span>';
-                throw new Error('Send already in progress on this page');
+            // Only apply page-level inProgress guard for bookmarklet (NOT in Tampermonkey)
+            if (!IS_TAMPERMONKEY) {
+                if (window.__twDailyScheduler.inProgress) {
+                    if (statusElement) statusElement.innerHTML = '<span style="color: #ED4245;">❌ Send already in progress on this page</span>';
+                    throw new Error('Send already in progress on this page');
+                }
+                window.__twDailyScheduler.inProgress = true;
             }
-
-            window.__twDailyScheduler.inProgress = true;
 
             const fields = [
                 { name: 'Player', value: '👤 ' + (stats.playerName || 'Unknown'), inline: false },
@@ -409,10 +405,7 @@
             const formatTroopString = (troopObj) => {
                 let str = '';
                 for (const [name, data] of Object.entries(troopObj)) {
-                    // PARSE NUMBER SAFELY TO CHECK FOR ZERO
                     const numericCount = this.parseNumber(data.count);
-                    
-                    // ONLY SHOW IF > 0
                     if (numericCount > 0) {
                         str += `${name}: ${data.count}\n`;
                     }
@@ -437,10 +430,9 @@
             });
 
             const finalize = (success) => {
-                window.__twDailyScheduler.inProgress = false;
-                if (success) {
-                    if (statusElement) statusElement.innerHTML = '<span style="color: #57F287;">✅ Successfully sent to Discord!</span>';
-                }
+                // Only clear page-level flag for bookmarklet
+                if (!IS_TAMPERMONKEY) window.__twDailyScheduler.inProgress = false;
+                if (success && statusElement) statusElement.innerHTML = '<span style="color: #57F287;">✅ Successfully sent to Discord!</span>';
             };
 
             return new Promise((resolve, reject) => {
@@ -454,7 +446,7 @@
                         headers: { 'Content-Type': 'application/json' },
                         data: payload,
                         onload: (res) => { if (res.status >= 200 && res.status < 300) handleSuccess(); else handleError(`Status ${res.status}: ${res.responseText}`); },
-                        onerror: (err) => handleError('Network Error')
+                        onerror: () => handleError('Network Error')
                     });
                 } else {
                     fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload })
@@ -478,7 +470,6 @@
 
         // --- AUTO SCHEDULER ---
 
-        // Clears page-level timers (safe to call from both bookmarklet and TM)
         clearPageScheduler() {
             try {
                 if (window.__twDailyScheduler.timeoutId) {
@@ -501,12 +492,11 @@
             const webhook = localStorage.getItem(CONFIG.keys.webhook);
 
             if (!enabled || !webhook) {
-                // if auto disabled, clear any page-level timers
                 this.clearPageScheduler();
                 return;
             }
 
-            // If bookmarklet: avoid creating multiple schedulers per page
+            // Bookmarklet-only scheduler guard
             if (!IS_TAMPERMONKEY) {
                 if (window.__twDailyScheduler.active) {
                     console.log('Bookmarklet: scheduler already active - skipping init.');
@@ -514,16 +504,13 @@
                 }
             }
 
-            // Always clear any previous timers (safe on both TM and bookmarklet).
+            // clear any previous timers, safe in both environments
             this.clearPageScheduler();
 
             const now = new Date();
-            // compute delay until the start of next minute boundary so intervals align to minutes
             const delay = (60 - now.getSeconds()) * 1000;
 
-            // Set page-level timeout and interval and mark active
             window.__twDailyScheduler.timeoutId = setTimeout(() => {
-                // Run check now, then set up 60s interval
                 this.checkAutoSend(time, webhook);
                 window.__twDailyScheduler.intervalId = setInterval(() => this.checkAutoSend(time, webhook), 60000);
             }, delay);
@@ -532,58 +519,42 @@
             console.log('Auto scheduler initialized (active:', window.__twDailyScheduler.active, ')');
         }
 
-        /**
-         * checkAutoSend
-         * - targetTime: "HH:MM"
-         * - webhook: webhook url
-         *
-         * Locks:
-         * - Uses localStorage intent/sending/sent markers to coordinate across tabs (Tampermonkey scenario)
-         * - Uses page-level inProgress flag to avoid concurrent sends on same page
-         */
         async checkAutoSend(targetTime, webhook) {
             try {
                 const now = new Date();
-                const currentTimeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 
-                // Parse target time to a Date for a better window check
+                // Parse target time
                 const [th, tm] = (targetTime || '23:00').split(':').map(v => parseInt(v, 10));
                 const target = new Date(now);
                 target.setHours(th, tm, 0, 0);
 
-                // Only proceed if we're within the target minute window (0 <= delta < 60s)
+                // Only continue if within 0..59999 ms of target minute
                 const deltaMs = now - target;
-                if (deltaMs < 0 || deltaMs >= 60000) {
-                    // Not in window - return
-                    return;
-                }
+                if (deltaMs < 0 || deltaMs >= 60000) return;
 
                 const dateStr = target.toDateString();
                 const uniqueKey = `${dateStr}_${targetTime}`;
 
-                // If already sent today according to localStorage, skip
                 if (localStorage.getItem(CONFIG.keys.sentMarker) === uniqueKey) {
                     console.log('Stats already sent for', uniqueKey);
                     return;
                 }
 
-                // Page-level in-progress guard (avoid concurrent sends on same page)
-                if (window.__twDailyScheduler.inProgress) {
+                // Page-level in-progress guard (bookmarklet only)
+                if (!IS_TAMPERMONKEY && window.__twDailyScheduler.inProgress) {
                     console.log('Page-level send already in progress, skipping this check.');
                     return;
                 }
 
-                // Cross-tab intent negotiation (existing approach)
+                // Cross-tab intent negotiation
                 const tabId = 'tab_' + Date.now() + '_' + Math.random().toString(36).slice(2);
                 const nonce = Date.now() + Math.random();
 
                 localStorage.setItem(CONFIG.keys.intentMarker, JSON.stringify({ key: uniqueKey, tabId, nonce, timestamp: Date.now() }));
-                // small jitter so different tabs don't all race at the same instant
                 await new Promise(r => setTimeout(r, Math.random() * 500 + 100));
 
                 const currentIntent = JSON.parse(localStorage.getItem(CONFIG.keys.intentMarker) || '{}');
                 if (currentIntent.nonce !== nonce) {
-                    // Someone else took intent
                     console.log('Lost intent to another tab');
                     return;
                 }
@@ -593,16 +564,14 @@
 
                 const currentSending = JSON.parse(localStorage.getItem(CONFIG.keys.sendingMarker) || '{}');
                 if (currentSending.nonce !== nonce) {
-                    // Someone else is sending
                     console.log('Another tab is sending');
                     return;
                 }
 
-                // This tab will send. Mark sentMarker optimistically only if send goes through successfully.
                 console.log('This tab will attempt to send daily stats:', tabId);
 
-                // Set page-level inProgress true to protect against concurrent sends on same page
-                window.__twDailyScheduler.inProgress = true;
+                // Set page-level inProgress only for bookmarklet
+                if (!IS_TAMPERMONKEY) window.__twDailyScheduler.inProgress = true;
 
                 try {
                     const stats = await this.gatherStats();
@@ -610,20 +579,18 @@
                     const savedName = localStorage.getItem(`tw_player_name_${stats.world}_${hookId}`);
                     if (savedName) stats.playerName = savedName;
 
-                    // perform send
                     await this.sendToDiscord(webhook, stats, null);
 
-                    // On success, record sentMarker so other tabs skip
+                    // Mark as sent on success
                     localStorage.setItem(CONFIG.keys.sentMarker, uniqueKey);
                     console.log('Auto-send success for', uniqueKey);
                 } catch (sendErr) {
                     console.error('Auto-send failed', sendErr);
-                    // don't set sentMarker; allow retries next day/minute
                     localStorage.removeItem(CONFIG.keys.sentMarker);
                     throw sendErr;
                 } finally {
-                    window.__twDailyScheduler.inProgress = false;
-                    // cleanup intent/sending markers
+                    // Clear page-level inProgress only for bookmarklet
+                    if (!IS_TAMPERMONKEY) window.__twDailyScheduler.inProgress = false;
                     localStorage.removeItem(CONFIG.keys.intentMarker);
                     localStorage.removeItem(CONFIG.keys.sendingMarker);
                 }
