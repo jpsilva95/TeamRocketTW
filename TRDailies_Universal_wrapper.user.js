@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mystery Dailies clean version
 // @namespace    http://tampermonkey.net/
-// @version      4.9.6
+// @version      4.9.8
 // @description  Send daily farm and resource stats to Discord webhook
 // @author       Mystery Inc.
 // @icon         https://i.ibb.co/x8JQX8yS/ex1.png
