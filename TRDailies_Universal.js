@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mystery Inc. Dailies (Fixed Version)
 // @namespace    http://tampermonkey.net/
-// @version      4.9.6
+// @version      1.4.7
 // @description  Send daily farm, resource stats, and troop counts to Discord (Hides 0 troop counts) - fixed scheduler locks
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -42,8 +42,33 @@
         inProgress: false
     };
 
+    // ------------------ NEW: small global send lock helper ------------------
+    // This atomic lock prevents Tampermonkey sandbox+page duplication by using a single integer minute marker.
+    // Returns true if this execution won the lock for the current minute; false otherwise.
+    function acquireGlobalSendLock() {
+        try {
+            const lockKey = 'tw_global_send_lock_minute';
+            const currentMinute = Math.floor(Date.now() / 60000); // integer minute
+            const stored = Number(localStorage.getItem(lockKey));
+
+            if (stored === currentMinute) {
+                // someone already sent in this minute
+                return false;
+            }
+
+            // claim the minute
+            localStorage.setItem(lockKey, String(currentMinute));
+            return true;
+        } catch (e) {
+            // if localStorage fails, be conservative and allow send (or block?) — choose to allow send.
+            // We return true here to avoid false-negatives due to storage errors.
+            return true;
+        }
+    }
+    // -----------------------------------------------------------------------
+
     const CONFIG = {
-        ver: '4.9.6',
+        ver: '1.4.7',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -53,7 +78,7 @@
             sentMarker: 'tw_daily_sent_marker',
             sendingMarker: 'tw_daily_sending_marker',
             intentMarker: 'tw_daily_intent_marker',
-            // new global per-minute lock
+            // new global per-minute lock (legacy key kept, but we use separate lock above)
             minuteLock: 'tw_send_minute_lock'
         },
         icons: {
@@ -428,13 +453,22 @@
         }
 
         async sendToDiscord(webhookUrl, stats, statusElement) {
-            // GLOBAL: enforce 1 send per minute across all tabs/pages
+            // NEW: global atomic lock to prevent Tampermonkey duplicate sends (sandbox + page)
+            const gotGlobalLock = acquireGlobalSendLock();
+            if (!gotGlobalLock) {
+                // Quietly abort duplicate attempt (not an error)
+                if (statusElement) statusElement.innerHTML = '<span style="color: #ED4245;">⏳ A send already occurred this minute (duplicate suppressed)</span>';
+                return;
+            }
+
+            // GLOBAL: enforce 1 send per minute across all tabs/pages (legacy per-minute negotiation)
             const wonMinute = await this.attemptMinuteLock();
             if (!wonMinute) {
                 if (statusElement) {
                     statusElement.innerHTML = '<span style="color: #ED4245;">⏳ A send already occurred this minute</span>';
                 }
-                throw new Error('Send already occurred this minute');
+                // we already set a global lock above to prevent TM dupes; if attemptMinuteLock loses, just return
+                return;
             }
 
             // Only apply page-level inProgress guard for bookmarklet (NOT in Tampermonkey)
