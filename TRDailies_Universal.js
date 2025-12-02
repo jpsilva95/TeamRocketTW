@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (Fixed Version)
+// @name         Mystery Inc. Dailies (Universal Version)
 // @namespace    http://tampermonkey.net/
-// @version      1.4.7
-// @description  Send daily farm, resource stats, and troop counts to Discord (Hides 0 troop counts) - fixed scheduler locks
+// @version      1.5
+// @description  Send daily farm, resource stats, and troop counts to Discord. Works on BOTH Scavenging and Non-Scavenging worlds.
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -18,14 +18,13 @@
     // Runtime detection
     const IS_TAMPERMONKEY = (typeof GM_info !== 'undefined') || (typeof GM_xmlhttpRequest !== 'undefined');
 
-    // -------- GLOBAL SINGLETON GUARD (prevents double-init in TM) --------
+    // -------- GLOBAL SINGLETON GUARD --------
     if (window.__twDailyInstanceActive) {
         console.log('Mystery Inc: Script instance already active — aborting.');
         return;
     }
     window.__twDailyInstanceActive = true;
 
-    // Bookmarklet reinjection guard: only active when NOT Tampermonkey
     if (!IS_TAMPERMONKEY) {
         if (window.__twDailyBookmarkletLoaded) {
             console.log('Mystery Inc: Bookmarklet already active — aborting reinjection.');
@@ -34,7 +33,6 @@
         window.__twDailyBookmarkletLoaded = true;
     }
 
-    // Page-level scheduler object (used for bookmarklet; harmless in TM)
     window.__twDailyScheduler = window.__twDailyScheduler || {
         timeoutId: null,
         intervalId: null,
@@ -42,43 +40,31 @@
         inProgress: false
     };
 
-    // ------------------ NEW: small global send lock helper ------------------
-    // This atomic lock prevents Tampermonkey sandbox+page duplication by using a single integer minute marker.
-    // Returns true if this execution won the lock for the current minute; false otherwise.
+    // ------------------ LOCK HELPER ------------------
     function acquireGlobalSendLock() {
         try {
             const lockKey = 'tw_global_send_lock_minute';
-            const currentMinute = Math.floor(Date.now() / 60000); // integer minute
+            const currentMinute = Math.floor(Date.now() / 60000);
             const stored = Number(localStorage.getItem(lockKey));
 
             if (stored === currentMinute) {
-                // someone already sent in this minute
                 return false;
             }
-
-            // claim the minute
             localStorage.setItem(lockKey, String(currentMinute));
             return true;
         } catch (e) {
-            // if localStorage fails, be conservative and allow send (or block?) — choose to allow send.
-            // We return true here to avoid false-negatives due to storage errors.
             return true;
         }
     }
-    // -----------------------------------------------------------------------
 
     const CONFIG = {
-        ver: '1.4.7',
+        ver: '1.5',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
             autoEnabled: 'tw_auto_send_enabled',
             autoTime: 'tw_auto_send_time',
             lastAutoDate: 'tw_last_auto_send',
-            sentMarker: 'tw_daily_sent_marker',
-            sendingMarker: 'tw_daily_sending_marker',
-            intentMarker: 'tw_daily_intent_marker',
-            // new global per-minute lock (legacy key kept, but we use separate lock above)
             minuteLock: 'tw_send_minute_lock'
         },
         icons: {
@@ -98,6 +84,8 @@
             this.checkVersion();
             this.initUI();
             this.initAutoScheduler();
+            this.isScavengingWorld = false; // Will be determined dynamically
+            this.worldConfigFileName = `worldConfigFile${game_data.world}`;
         }
 
         checkVersion() {
@@ -105,13 +93,6 @@
             if (lastVer !== CONFIG.ver) {
                 console.log(`New script version: ${CONFIG.ver} (was: ${lastVer})`);
                 localStorage.setItem(CONFIG.keys.version, CONFIG.ver);
-                // cleanup legacy markers if present
-                try {
-                    localStorage.removeItem(CONFIG.keys.sentMarker);
-                    localStorage.removeItem(CONFIG.keys.sendingMarker);
-                    localStorage.removeItem(CONFIG.keys.intentMarker);
-                    localStorage.removeItem(CONFIG.keys.lastAutoDate);
-                } catch (e) {}
             }
         }
 
@@ -204,7 +185,6 @@
                     localStorage.setItem(CONFIG.keys.autoTime, autoTime.value);
                     this.initAutoScheduler();
                 } else {
-                    // if disabling, clear page-level scheduler (safe on both TM and bookmarklet)
                     this.clearPageScheduler();
                 }
             };
@@ -298,6 +278,9 @@
         // --- DATA GATHERING ---
 
         async gatherStats() {
+            // 1. Determine World Settings (Scavenging or not)
+            await this.initWorldConfig();
+
             const stats = {
                 farmResources: { wood: 'N/A', clay: 'N/A', iron: 'N/A' },
                 gatherResources: { wood: 'N/A', clay: 'N/A', iron: 'N/A' },
@@ -315,16 +298,55 @@
 
             await this.fetchPlayerName(baseUrl, search, stats);
             await this.fetchLootStats(baseUrl, search, stats);
-            await this.fetchScavengeStats(baseUrl, search, stats);
+            
+            // Only fetch scavenge stats if world allows it
+            if (this.isScavengingWorld) {
+                await this.fetchScavengeStats(baseUrl, search, stats);
+            } else {
+                stats.gatherTotal = "0 (Disabled)";
+            }
 
             if (stats.gatherTotal !== 'N/A' && stats.farmTotal !== 'N/A') {
                 const gather = this.parseNumber(stats.gatherTotal);
                 const farm = this.parseNumber(stats.farmTotal);
                 stats.grandTotal = this.formatNumber(gather + farm);
+            } else if (stats.farmTotal !== 'N/A') {
+                 stats.grandTotal = stats.farmTotal;
             }
 
             await this.fetchTroopCounts(baseUrl, search, stats);
             return stats;
+        }
+
+        // --- NEW: World Config Check ---
+        async initWorldConfig() {
+            // Check cache
+            let worldConfig = localStorage.getItem(this.worldConfigFileName);
+            
+            if (worldConfig === null) {
+                // Fetch if not cached
+                try {
+                    const response = await fetch('/interface.php?func=get_config');
+                    const text = await response.text();
+                    localStorage.setItem(this.worldConfigFileName, text);
+                    worldConfig = text;
+                } catch (e) {
+                    console.error("Error fetching world config", e);
+                    this.isScavengingWorld = false; // Fallback
+                    return;
+                }
+            }
+            
+            // Parse XML
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(worldConfig, "text/xml");
+            try {
+                const scavValue = xmlDoc.getElementsByTagName('config')[0].getElementsByTagName('game')[0].getElementsByTagName('scavenging')[0].textContent.trim();
+                this.isScavengingWorld = (scavValue === "1");
+            } catch (e) {
+                console.warn("Could not parse scavenging setting, assuming enabled as default or fallback.");
+                this.isScavengingWorld = true; 
+            }
         }
 
         async fetchPlayerName(baseUrl, search, stats) {
@@ -373,6 +395,21 @@
         }
 
         async fetchTroopCounts(baseUrl, search, stats) {
+            if (this.isScavengingWorld) {
+                // METHOD A: Fetch from Scavenging Mass Screen (JSON)
+                await this.fetchTroopsScavengingJSON(baseUrl, search, stats);
+            } else {
+                // METHOD B: Fetch from Troops Overview Screen (HTML Scraping)
+                await this.fetchTroopsOverviewHTML(baseUrl, search, stats);
+            }
+
+            // Formatting numbers for display
+            for (let key in stats.troopsHome) stats.troopsHome[key].count = this.formatNumber(stats.troopsHome[key].count);
+            for (let key in stats.troopsScavenging) stats.troopsScavenging[key].count = this.formatNumber(stats.troopsScavenging[key].count);
+        }
+
+        // --- METHOD A: JSON (Existing) ---
+        async fetchTroopsScavengingJSON(baseUrl, search, stats) {
             let page = 0;
             let done = false;
             while (!done && page < 20) {
@@ -408,8 +445,77 @@
                 page++;
                 await new Promise(r => setTimeout(r, 200));
             }
-            for (let key in stats.troopsHome) stats.troopsHome[key].count = this.formatNumber(stats.troopsHome[key].count);
-            for (let key in stats.troopsScavenging) stats.troopsScavenging[key].count = this.formatNumber(stats.troopsScavenging[key].count);
+        }
+
+        // --- METHOD B: HTML Scraping (New) ---
+        async fetchTroopsOverviewHTML(baseUrl, search, stats) {
+            let page = 0;
+            let done = false;
+            const unitColMap = {}; // Will map column index to unit name (e.g., 2 -> 'spear')
+
+            while (!done && page < 50) { // Safety limit of 50 pages
+                const url = `${baseUrl}?${search.toString()}&screen=overview_villages&mode=units&page=${page}`;
+                const res = await fetch(url);
+                const html = await res.text();
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                const table = doc.querySelector('#units_table');
+
+                if (!table) { done = true; break; }
+
+                // Parse Header (only on first page to build map)
+                if (page === 0) {
+                    const headers = table.querySelectorAll('th');
+                    headers.forEach((th, index) => {
+                        const img = th.querySelector('img');
+                        if (img && img.src.includes('unit_')) {
+                            // Extract unit name from src (e.g., .../unit_spear.png -> spear)
+                            const match = img.src.match(/unit_(\w+)\.png/);
+                            if (match) {
+                                unitColMap[index] = match[1];
+                            }
+                        }
+                    });
+                }
+
+                // Parse Rows
+                const rows = table.querySelectorAll('tbody tr');
+                if (rows.length === 0) { done = true; break; }
+
+                // Check if last page (pagination check) - simple check if rows < limit or standard logic
+                // TW usually hides the "next" link if done, but iterating is safer. 
+                // We'll rely on the table existing. If the page is empty/out of bounds, TW usually redirects or shows empty table.
+                
+                let rowsProcessed = 0;
+                rows.forEach(row => {
+                    if(row.classList.contains('units_away')) return; // Skip "away" rows if they exist mixed in
+                    
+                    const cells = row.querySelectorAll('td');
+                    // Iterate through our known unit columns
+                    for (const [colIndex, unitCode] of Object.entries(unitColMap)) {
+                        if (cells[colIndex]) {
+                            const count = parseInt(cells[colIndex].textContent.trim()) || 0;
+                            if (count > 0) {
+                                this.addTroopCount(stats.troopsHome, unitCode, count);
+                            }
+                        }
+                    }
+                    rowsProcessed++;
+                });
+
+                if (rowsProcessed === 0) done = true;
+
+                // Check for "next page" link to decide if we stop
+                const navLinks = doc.querySelectorAll('.paged-nav-item');
+                let hasNext = false;
+                navLinks.forEach(link => {
+                    if (link.href.includes(`page=${page + 1}`)) hasNext = true;
+                });
+                // Also check legacy nav
+                if (!hasNext && !doc.body.innerHTML.includes(`page=${page + 1}`)) done = true;
+
+                page++;
+                await new Promise(r => setTimeout(r, 200)); // Be nice to the server
+            }
         }
 
         addTroopCount(storage, unitCode, count) {
@@ -422,14 +528,12 @@
 
         // --- DISCORD SENDING ---
 
-        // Helper: returns current minute key: "YYYY-MM-DDTHH:MM"
         getCurrentMinuteKey() {
             const d = new Date();
             d.setSeconds(0, 0);
             return d.toISOString().slice(0, 16);
         }
 
-        // Attempt to claim the current minute. Returns true if this tab won the minute.
         async attemptMinuteLock() {
             const minute = this.getCurrentMinuteKey();
             const tabId = 'tab_' + Date.now() + '_' + Math.random().toString(36).slice(2);
@@ -437,11 +541,9 @@
             try {
                 localStorage.setItem(CONFIG.keys.minuteLock, JSON.stringify(payload));
             } catch (e) {
-                // localStorage write could fail rarely (e.g. quota), treat as loss
                 return false;
             }
 
-            // Small randomized delay so racing tabs can write and we can verify winner.
             await new Promise(r => setTimeout(r, Math.random() * 300 + 100));
 
             try {
@@ -453,25 +555,20 @@
         }
 
         async sendToDiscord(webhookUrl, stats, statusElement) {
-            // NEW: global atomic lock to prevent Tampermonkey duplicate sends (sandbox + page)
             const gotGlobalLock = acquireGlobalSendLock();
             if (!gotGlobalLock) {
-                // Quietly abort duplicate attempt (not an error)
                 if (statusElement) statusElement.innerHTML = '<span style="color: #ED4245;">⏳ A send already occurred this minute (duplicate suppressed)</span>';
                 return;
             }
 
-            // GLOBAL: enforce 1 send per minute across all tabs/pages (legacy per-minute negotiation)
             const wonMinute = await this.attemptMinuteLock();
             if (!wonMinute) {
                 if (statusElement) {
                     statusElement.innerHTML = '<span style="color: #ED4245;">⏳ A send already occurred this minute</span>';
                 }
-                // we already set a global lock above to prevent TM dupes; if attemptMinuteLock loses, just return
                 return;
             }
 
-            // Only apply page-level inProgress guard for bookmarklet (NOT in Tampermonkey)
             if (!IS_TAMPERMONKEY) {
                 if (window.__twDailyScheduler.inProgress) {
                     if (statusElement) statusElement.innerHTML = '<span style="color: #ED4245;">❌ Send already in progress on this page</span>';
@@ -516,7 +613,6 @@
             });
 
             const finalize = (success) => {
-                // Only clear page-level flag for bookmarklet
                 if (!IS_TAMPERMONKEY) window.__twDailyScheduler.inProgress = false;
                 if (success && statusElement) statusElement.innerHTML = '<span style="color: #57F287;">✅ Successfully sent to Discord!</span>';
             };
@@ -587,7 +683,6 @@
                 return;
             }
 
-            // Bookmarklet-only scheduler guard
             if (!IS_TAMPERMONKEY) {
                 if (window.__twDailyScheduler.active) {
                     console.log('Bookmarklet: scheduler already active - skipping init.');
@@ -595,7 +690,6 @@
                 }
             }
 
-            // clear any previous timers, safe in both environments
             this.clearPageScheduler();
 
             const now = new Date();
@@ -614,17 +708,13 @@
             try {
                 const now = new Date();
 
-                // Parse target time
                 const [th, tm] = (targetTime || '23:00').split(':').map(v => parseInt(v, 10));
                 const target = new Date(now);
                 target.setHours(th, tm, 0, 0);
 
-                // Only continue if within 0..59999 ms of target minute
                 const deltaMs = now - target;
                 if (deltaMs < 0 || deltaMs >= 60000) return;
 
-                // With the per-minute lock in sendToDiscord we don't need cross-tab intent negotiation.
-                // Just gather stats and attempt to send; sendToDiscord will enforce 1-send-per-minute globally.
                 const stats = await this.gatherStats();
                 const hookId = webhook.split('/').pop();
                 const savedName = localStorage.getItem(`tw_player_name_${stats.world}_${hookId}`);
