@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mystery Inc. Dailies (Universal Version)
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      5.0
 // @description  Send daily farm, resource stats, and troop counts to Discord. Works on BOTH Scavenging and Non-Scavenging worlds.
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -58,7 +58,7 @@
     }
 
     const CONFIG = {
-        ver: '1.5',
+        ver: '5.0',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
