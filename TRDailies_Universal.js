@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mystery Inc. Dailies (Universal Version)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
+// @version      5.1
 // @description  Send daily farm, resource stats, and troop counts to Discord. Works on BOTH Scavenging and Non-Scavenging worlds.
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -58,7 +58,7 @@
     }
 
     const CONFIG = {
-        ver: '5.0',
+        ver: '5.1',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -105,14 +105,14 @@
             if (questLog) {
                 const container = document.createElement('div');
                 container.style.cssText = 'margin-top: 5px; text-align: center;';
-                
+
                 const btn = document.createElement('button');
                 btn.id = 'trDailiesBtn';
                 btn.innerHTML = `<img src="${CONFIG.icons.button}" style="width: 45px; height: 45px;">`;
                 btn.title = 'Daily Stats to Discord';
                 btn.style.cssText = 'width: 40px; height: 40px; background: transparent; border: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0;';
                 btn.onclick = (e) => { e.preventDefault(); this.openSettingsModal(); };
-                
+
                 container.appendChild(btn);
                 questLog.appendChild(container);
             } else {
@@ -207,12 +207,12 @@
             sendBtn.onclick = async () => {
                 const url = webhookInput.value.trim();
                 const statusMsg = document.getElementById('statusMsg');
-                
+
                 if (!url) {
                     statusMsg.innerHTML = '<span style="color: #ED4245;">❌ Please enter a webhook URL</span>';
                     return;
                 }
-                
+
                 sendBtn.disabled = true;
                 sendBtn.style.opacity = '0.5';
                 localStorage.setItem(CONFIG.keys.webhook, url);
@@ -241,7 +241,7 @@
             const generateTroopHtml = (troopData, title) => {
                 let html = '';
                 let hasTroops = false;
-                
+
                 for (const [unit, data] of Object.entries(troopData)) {
                     const countNum = this.parseNumber(data.count);
                     if (countNum <= 0) continue;
@@ -298,7 +298,7 @@
 
             await this.fetchPlayerName(baseUrl, search, stats);
             await this.fetchLootStats(baseUrl, search, stats);
-            
+
             // Only fetch scavenge stats if world allows it
             if (this.isScavengingWorld) {
                 await this.fetchScavengeStats(baseUrl, search, stats);
@@ -318,13 +318,11 @@
             return stats;
         }
 
-        // --- NEW: World Config Check ---
+        // --- World Config Check ---
         async initWorldConfig() {
-            // Check cache
             let worldConfig = localStorage.getItem(this.worldConfigFileName);
-            
+
             if (worldConfig === null) {
-                // Fetch if not cached
                 try {
                     const response = await fetch('/interface.php?func=get_config');
                     const text = await response.text();
@@ -332,12 +330,11 @@
                     worldConfig = text;
                 } catch (e) {
                     console.error("Error fetching world config", e);
-                    this.isScavengingWorld = false; // Fallback
+                    this.isScavengingWorld = false;
                     return;
                 }
             }
-            
-            // Parse XML
+
             const parser = new DOMParser();
             const xmlDoc = parser.parseFromString(worldConfig, "text/xml");
             try {
@@ -345,7 +342,7 @@
                 this.isScavengingWorld = (scavValue === "1");
             } catch (e) {
                 console.warn("Could not parse scavenging setting, assuming enabled as default or fallback.");
-                this.isScavengingWorld = true; 
+                this.isScavengingWorld = true;
             }
         }
 
@@ -405,10 +402,11 @@
 
             // Formatting numbers for display
             for (let key in stats.troopsHome) stats.troopsHome[key].count = this.formatNumber(stats.troopsHome[key].count);
+            // Troops Scavenging will be empty for non-scav worlds, but we format anyway
             for (let key in stats.troopsScavenging) stats.troopsScavenging[key].count = this.formatNumber(stats.troopsScavenging[key].count);
         }
 
-        // --- METHOD A: JSON (Existing) ---
+        // --- METHOD A: JSON (Scavenging World) ---
         async fetchTroopsScavengingJSON(baseUrl, search, stats) {
             let page = 0;
             let done = false;
@@ -417,9 +415,9 @@
                 const res = await fetch(url);
                 const text = await res.text();
                 const match = text.match(/ScavengeMassScreen[\s\S]*?(,\n *\[.*?\}{0,3}\],\n)/);
-                
+
                 if (!match || match.length <= 1) { done = true; break; }
-                
+
                 let jsonStr = match[1];
                 jsonStr = jsonStr.substring(jsonStr.indexOf('['));
                 jsonStr = jsonStr.substring(0, jsonStr.length - 2);
@@ -447,13 +445,13 @@
             }
         }
 
-        // --- METHOD B: HTML Scraping (New) ---
+        // --- METHOD B: HTML Scraping (Non-Scavenging World) ---
         async fetchTroopsOverviewHTML(baseUrl, search, stats) {
             let page = 0;
             let done = false;
             const unitColMap = {}; // Will map column index to unit name (e.g., 2 -> 'spear')
 
-            while (!done && page < 50) { // Safety limit of 50 pages
+            while (!done && page < 50) {
                 const url = `${baseUrl}?${search.toString()}&screen=overview_villages&mode=units&page=${page}`;
                 const res = await fetch(url);
                 const html = await res.text();
@@ -481,19 +479,18 @@
                 const rows = table.querySelectorAll('tbody tr');
                 if (rows.length === 0) { done = true; break; }
 
-                // Check if last page (pagination check) - simple check if rows < limit or standard logic
-                // TW usually hides the "next" link if done, but iterating is safer. 
-                // We'll rely on the table existing. If the page is empty/out of bounds, TW usually redirects or shows empty table.
-                
                 let rowsProcessed = 0;
                 rows.forEach(row => {
-                    if(row.classList.contains('units_away')) return; // Skip "away" rows if they exist mixed in
-                    
+                    // Skip 'away' rows and the final 'total' row
+                    if(row.classList.contains('units_away') || row.id === 'units_table_total') return;
+
                     const cells = row.querySelectorAll('td');
                     // Iterate through our known unit columns
                     for (const [colIndex, unitCode] of Object.entries(unitColMap)) {
                         if (cells[colIndex]) {
-                            const count = parseInt(cells[colIndex].textContent.trim()) || 0;
+                            // *** FIX APPLIED HERE ***
+                            // Use this.parseNumber to correctly handle thousands separators
+                            const count = this.parseNumber(cells[colIndex].textContent);
                             if (count > 0) {
                                 this.addTroopCount(stats.troopsHome, unitCode, count);
                             }
@@ -510,11 +507,10 @@
                 navLinks.forEach(link => {
                     if (link.href.includes(`page=${page + 1}`)) hasNext = true;
                 });
-                // Also check legacy nav
                 if (!hasNext && !doc.body.innerHTML.includes(`page=${page + 1}`)) done = true;
 
                 page++;
-                await new Promise(r => setTimeout(r, 200)); // Be nice to the server
+                await new Promise(r => setTimeout(r, 200));
             }
         }
 
@@ -648,6 +644,8 @@
         parseNumber(str) {
             if (!str) return 0;
             if (typeof str === 'number') return str;
+            // Removed non-digit filtering to rely on global settings (but keeping it here as it was, just adding .replace())
+            // The original .replace(/\./g, '') was slightly off for localized numbers; the current logic uses a comprehensive cleaning:
             return parseInt(str.replace(/\s/g, '').replace(/\./g, '').replace(/[^\d]/g, '')) || 0;
         }
 
