@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (Universal Version)
-// @namespace    http://tampermonkey.net/
-// @version      5.1
-// @description  Send daily farm, resource stats, and troop counts to Discord. Works on BOTH Scavenging and Non-Scavenging worlds.
+// @name         Mystery Inc. Dailies (v8.0)
+// @namespace    http://tampermonkey.net
+// @version      5.5
+// @description  Send daily farm, resource stats, and troop counts to Discord (handles scavenging/non-scavenging worlds, hides 0 troop counts, fixed scheduler locks)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -15,10 +15,8 @@
 (function() {
     'use strict';
 
-    // Runtime detection
     const IS_TAMPERMONKEY = (typeof GM_info !== 'undefined') || (typeof GM_xmlhttpRequest !== 'undefined');
 
-    // -------- GLOBAL SINGLETON GUARD --------
     if (window.__twDailyInstanceActive) {
         console.log('Mystery Inc: Script instance already active — aborting.');
         return;
@@ -40,31 +38,30 @@
         inProgress: false
     };
 
-    // ------------------ LOCK HELPER ------------------
     function acquireGlobalSendLock() {
         try {
             const lockKey = 'tw_global_send_lock_minute';
             const currentMinute = Math.floor(Date.now() / 60000);
             const stored = Number(localStorage.getItem(lockKey));
-
-            if (stored === currentMinute) {
-                return false;
-            }
+            if (stored === currentMinute) return false;
             localStorage.setItem(lockKey, String(currentMinute));
             return true;
-        } catch (e) {
+        } catch {
             return true;
         }
     }
 
     const CONFIG = {
-        ver: '5.1',
+        ver: '5.5',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
             autoEnabled: 'tw_auto_send_enabled',
             autoTime: 'tw_auto_send_time',
             lastAutoDate: 'tw_last_auto_send',
+            sentMarker: 'tw_daily_sent_marker',
+            sendingMarker: 'tw_daily_sending_marker',
+            intentMarker: 'tw_daily_intent_marker',
             minuteLock: 'tw_send_minute_lock'
         },
         icons: {
@@ -84,8 +81,6 @@
             this.checkVersion();
             this.initUI();
             this.initAutoScheduler();
-            this.isScavengingWorld = false; // Will be determined dynamically
-            this.worldConfigFileName = `worldConfigFile${game_data.world}`;
         }
 
         checkVersion() {
@@ -93,10 +88,14 @@
             if (lastVer !== CONFIG.ver) {
                 console.log(`New script version: ${CONFIG.ver} (was: ${lastVer})`);
                 localStorage.setItem(CONFIG.keys.version, CONFIG.ver);
+                try {
+                    localStorage.removeItem(CONFIG.keys.sentMarker);
+                    localStorage.removeItem(CONFIG.keys.sendingMarker);
+                    localStorage.removeItem(CONFIG.keys.intentMarker);
+                    localStorage.removeItem(CONFIG.keys.lastAutoDate);
+                } catch {}
             }
         }
-
-        // --- UI GENERATION ---
 
         initUI() {
             if (document.getElementById('trDailiesBtn')) return;
@@ -105,14 +104,15 @@
             if (questLog) {
                 const container = document.createElement('div');
                 container.style.cssText = 'margin-top: 5px; text-align: center;';
-
                 const btn = document.createElement('button');
                 btn.id = 'trDailiesBtn';
-                btn.innerHTML = `<img src="${CONFIG.icons.button}" style="width: 45px; height: 45px;">`;
                 btn.title = 'Daily Stats to Discord';
                 btn.style.cssText = 'width: 40px; height: 40px; background: transparent; border: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0;';
+                const img = document.createElement('img');
+                img.src = CONFIG.icons.button;
+                img.style.cssText = 'width: 45px; height: 45px;';
+                btn.appendChild(img);
                 btn.onclick = (e) => { e.preventDefault(); this.openSettingsModal(); };
-
                 container.appendChild(btn);
                 questLog.appendChild(container);
             } else {
@@ -121,9 +121,12 @@
                     const link = document.createElement('a');
                     link.id = 'trDailiesBtn';
                     link.href = '#';
-                    link.innerHTML = `<img src="${CONFIG.icons.button}" style="width: 20px; height: 20px; vertical-align: middle;">`;
                     link.title = 'Daily Stats';
                     link.style.cssText = 'margin-left: 10px; padding: 5px; background: transparent; border: none; text-decoration: none; display: inline-block;';
+                    const img = document.createElement('img');
+                    img.src = CONFIG.icons.button;
+                    img.style.cssText = 'width: 20px; height: 20px; vertical-align: middle;';
+                    link.appendChild(img);
                     link.onclick = (e) => { e.preventDefault(); this.openSettingsModal(); };
                     headerInfo.appendChild(link);
                 }
@@ -137,42 +140,85 @@
             const modal = document.createElement('div');
             modal.style.cssText = 'background: #2C2F33; color: #DCDDDE; padding: 25px; border-radius: 8px; width: 550px; box-shadow: 0 8px 16px rgba(0,0,0,0.3); font-family: Arial, sans-serif;';
 
-            modal.innerHTML = `
-                <h2 style="margin-top: 0; color: #5865F2;">📊 Send Daily Stats to Discord</h2>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">Discord Webhook URL:</label>
-                    <input type="text" id="webhookUrl" placeholder="https://discord.com/api/webhooks/..." style="width: 100%; padding: 8px; border: 1px solid #40444B; background: #40444B; color: #DCDDDE; border-radius: 4px; box-sizing: border-box;">
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px;">
-                        <input type="checkbox" id="autoSendEnabled" style="margin-right: 5px;"><strong>Auto-send daily at:</strong>
-                    </label>
-                    <input type="time" id="autoSendTime" value="23:00" disabled style="width: 100%; padding: 8px; border: 1px solid #40444B; background: #40444B; color: #DCDDDE; border-radius: 4px; box-sizing: border-box;">
-                    <p style="font-size: 12px; color: #B9BBBE; margin: 5px 0 0 0;">Leave the game open for auto-send to work</p>
-                </div>
-                <div id="statsPreview" style="background: #40444B; padding: 15px; border-radius: 4px; margin-bottom: 15px;">
-                    <p style="margin: 5px 0;"><strong>Gathering stats...</strong></p>
-                </div>
-                <div style="display: flex; gap: 10px;">
-                    <button id="sendBtn" style="flex: 1; padding: 10px; background: #5865F2; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold;">Send to Discord</button>
-                    <button id="closeBtn" style="flex: 1; padding: 10px; background: #ED4245; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold;">Close</button>
-                </div>
-                <div id="statusMsg" style="margin-top: 15px; text-align: center; font-size: 14px;"></div>
-            `;
+            const title = document.createElement('h2');
+            title.style.cssText = 'margin-top: 0; color: #5865F2;';
+            title.textContent = '📊 Send Daily Stats to Discord';
+            modal.appendChild(title);
+
+            const webhookWrap = document.createElement('div');
+            webhookWrap.style.cssText = 'margin-bottom: 15px;';
+            const webhookLabel = document.createElement('label');
+            webhookLabel.style.cssText = 'display: block; margin-bottom: 5px; font-weight: bold;';
+            webhookLabel.textContent = 'Discord Webhook URL:';
+            const webhookInput = document.createElement('input');
+            webhookInput.type = 'text';
+            webhookInput.id = 'webhookUrl';
+            webhookInput.placeholder = 'https://discord.com/api/webhooks/...';
+            webhookInput.style.cssText = 'width: 100%; padding: 8px; border: 1px solid #40444B; background: #40444B; color: #DCDDDE; border-radius: 4px; box-sizing: border-box;';
+            webhookWrap.appendChild(webhookLabel);
+            webhookWrap.appendChild(webhookInput);
+            modal.appendChild(webhookWrap);
+
+            const autoWrap = document.createElement('div');
+            autoWrap.style.cssText = 'margin-bottom: 15px;';
+            const autoLabel = document.createElement('label');
+            autoLabel.style.cssText = 'display: block; margin-bottom: 5px;';
+            const autoCheck = document.createElement('input');
+            autoCheck.type = 'checkbox';
+            autoCheck.id = 'autoSendEnabled';
+            autoCheck.style.cssText = 'margin-right: 5px;';
+            const autoLabelStrong = document.createElement('strong');
+            autoLabelStrong.textContent = 'Auto-send daily at:';
+            autoLabel.appendChild(autoCheck);
+            autoLabel.appendChild(autoLabelStrong);
+            const autoTime = document.createElement('input');
+            autoTime.type = 'time';
+            autoTime.id = 'autoSendTime';
+            autoTime.value = '23:00';
+            autoTime.disabled = true;
+            autoTime.style.cssText = 'width: 100%; padding: 8px; border: 1px solid #40444B; background: #40444B; color: #DCDDDE; border-radius: 4px; box-sizing: border-box;';
+            const autoNote = document.createElement('p');
+            autoNote.style.cssText = 'font-size: 12px; color: #B9BBBE; margin: 5px 0 0 0;';
+            autoNote.textContent = 'Leave the game open for auto-send to work';
+            autoWrap.appendChild(autoLabel);
+            autoWrap.appendChild(autoTime);
+            autoWrap.appendChild(autoNote);
+            modal.appendChild(autoWrap);
+
+            const preview = document.createElement('div');
+            preview.id = 'statsPreview';
+            preview.style.cssText = 'background: #40444B; padding: 15px; border-radius: 4px; margin-bottom: 15px;';
+            const previewP = document.createElement('p');
+            previewP.style.cssText = 'margin: 5px 0;';
+            const previewStrong = document.createElement('strong');
+            previewStrong.textContent = 'Gathering stats...';
+            previewP.appendChild(previewStrong);
+            preview.appendChild(previewP);
+            modal.appendChild(preview);
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display: flex; gap: 10px;';
+            const sendBtn = document.createElement('button');
+            sendBtn.id = 'sendBtn';
+            sendBtn.style.cssText = 'flex: 1; padding: 10px; background: #5865F2; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold;';
+            sendBtn.textContent = 'Send to Discord';
+            const closeBtn = document.createElement('button');
+            closeBtn.id = 'closeBtn';
+            closeBtn.style.cssText = 'flex: 1; padding: 10px; background: #ED4245; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold;';
+            closeBtn.textContent = 'Close';
+            btnRow.appendChild(sendBtn);
+            btnRow.appendChild(closeBtn);
+            modal.appendChild(btnRow);
+
+            const statusMsg = document.createElement('div');
+            statusMsg.id = 'statusMsg';
+            statusMsg.style.cssText = 'margin-top: 15px; text-align: center; font-size: 14px;';
+            modal.appendChild(statusMsg);
 
             overlay.appendChild(modal);
             document.body.appendChild(overlay);
-            this.setupModalLogic(overlay);
-        }
 
-        setupModalLogic(overlay) {
-            const webhookInput = document.getElementById('webhookUrl');
-            const autoCheck = document.getElementById('autoSendEnabled');
-            const autoTime = document.getElementById('autoSendTime');
-            const preview = document.getElementById('statsPreview');
-            const sendBtn = document.getElementById('sendBtn');
-            const closeBtn = document.getElementById('closeBtn');
-
+            // Modal logic
             webhookInput.value = localStorage.getItem(CONFIG.keys.webhook) || '';
             autoCheck.checked = localStorage.getItem(CONFIG.keys.autoEnabled) === 'true';
             autoTime.value = localStorage.getItem(CONFIG.keys.autoTime) || '23:00';
@@ -206,18 +252,14 @@
 
             sendBtn.onclick = async () => {
                 const url = webhookInput.value.trim();
-                const statusMsg = document.getElementById('statusMsg');
-
                 if (!url) {
                     statusMsg.innerHTML = '<span style="color: #ED4245;">❌ Please enter a webhook URL</span>';
                     return;
                 }
-
                 sendBtn.disabled = true;
                 sendBtn.style.opacity = '0.5';
                 localStorage.setItem(CONFIG.keys.webhook, url);
                 statusMsg.innerHTML = '<span style="color: #FEE75C;">⏳ Sending...</span>';
-
                 try {
                     const stats = await this.gatherStats();
                     const manualName = document.getElementById('manualPlayerName');
@@ -226,7 +268,6 @@
                         const hookId = url.split('/').pop();
                         localStorage.setItem(`tw_player_name_${stats.world}_${hookId}`, stats.playerName);
                     }
-
                     await this.sendToDiscord(url, stats, statusMsg);
                 } catch (e) {
                     statusMsg.innerHTML = `<span style="color: #ED4245;">❌ Error: ${e.message}</span>`;
@@ -241,11 +282,9 @@
             const generateTroopHtml = (troopData, title) => {
                 let html = '';
                 let hasTroops = false;
-
                 for (const [unit, data] of Object.entries(troopData)) {
                     const countNum = this.parseNumber(data.count);
                     if (countNum <= 0) continue;
-
                     if (!hasTroops) {
                         html += `<p style="margin: 10px 0 5px 0; border-top: 1px solid #2C2F33; padding-top: 10px;"><strong>${title}</strong></p>`;
                         hasTroops = true;
@@ -275,12 +314,7 @@
             `;
         }
 
-        // --- DATA GATHERING ---
-
         async gatherStats() {
-            // 1. Determine World Settings (Scavenging or not)
-            await this.initWorldConfig();
-
             const stats = {
                 farmResources: { wood: 'N/A', clay: 'N/A', iron: 'N/A' },
                 gatherResources: { wood: 'N/A', clay: 'N/A', iron: 'N/A' },
@@ -298,52 +332,16 @@
 
             await this.fetchPlayerName(baseUrl, search, stats);
             await this.fetchLootStats(baseUrl, search, stats);
-
-            // Only fetch scavenge stats if world allows it
-            if (this.isScavengingWorld) {
-                await this.fetchScavengeStats(baseUrl, search, stats);
-            } else {
-                stats.gatherTotal = "0 (Disabled)";
-            }
+            await this.fetchScavengeStats(baseUrl, search, stats);
 
             if (stats.gatherTotal !== 'N/A' && stats.farmTotal !== 'N/A') {
                 const gather = this.parseNumber(stats.gatherTotal);
                 const farm = this.parseNumber(stats.farmTotal);
                 stats.grandTotal = this.formatNumber(gather + farm);
-            } else if (stats.farmTotal !== 'N/A') {
-                 stats.grandTotal = stats.farmTotal;
             }
 
             await this.fetchTroopCounts(baseUrl, search, stats);
             return stats;
-        }
-
-        // --- World Config Check ---
-        async initWorldConfig() {
-            let worldConfig = localStorage.getItem(this.worldConfigFileName);
-
-            if (worldConfig === null) {
-                try {
-                    const response = await fetch('/interface.php?func=get_config');
-                    const text = await response.text();
-                    localStorage.setItem(this.worldConfigFileName, text);
-                    worldConfig = text;
-                } catch (e) {
-                    console.error("Error fetching world config", e);
-                    this.isScavengingWorld = false;
-                    return;
-                }
-            }
-
-            const parser = new DOMParser();
-            const xmlDoc = parser.parseFromString(worldConfig, "text/xml");
-            try {
-                const scavValue = xmlDoc.getElementsByTagName('config')[0].getElementsByTagName('game')[0].getElementsByTagName('scavenging')[0].textContent.trim();
-                this.isScavengingWorld = (scavValue === "1");
-            } catch (e) {
-                console.warn("Could not parse scavenging setting, assuming enabled as default or fallback.");
-                this.isScavengingWorld = true;
-            }
         }
 
         async fetchPlayerName(baseUrl, search, stats) {
@@ -391,127 +389,84 @@
             } catch (e) { console.error(e); }
         }
 
+        async checkScavengingEnabled(baseUrl) {
+            try {
+                const root = baseUrl.replace(/game\.php.*/, '');
+                const res = await fetch(`${root}interface.php?func=get_config`);
+                const xml = new DOMParser().parseFromString(await res.text(), 'text/xml');
+                const scav = xml.querySelector('config > game > scavenging');
+                return scav && scav.textContent.trim() === "1";
+            } catch (e) {
+                console.error("Error checking scavenging config", e);
+                return true;
+            }
+        }
+
         async fetchTroopCounts(baseUrl, search, stats) {
-            if (this.isScavengingWorld) {
-                // METHOD A: Fetch from Scavenging Mass Screen (JSON)
-                await this.fetchTroopsScavengingJSON(baseUrl, search, stats);
-            } else {
-                // METHOD B: Fetch from Troops Overview Screen (HTML Scraping)
-                await this.fetchTroopsOverviewHTML(baseUrl, search, stats);
-            }
+            const scavengingEnabled = await this.checkScavengingEnabled(baseUrl);
 
-            // Formatting numbers for display
-            for (let key in stats.troopsHome) stats.troopsHome[key].count = this.formatNumber(stats.troopsHome[key].count);
-            // Troops Scavenging will be empty for non-scav worlds, but we format anyway
-            for (let key in stats.troopsScavenging) stats.troopsScavenging[key].count = this.formatNumber(stats.troopsScavenging[key].count);
-        }
-
-        // --- METHOD A: JSON (Scavenging World) ---
-        async fetchTroopsScavengingJSON(baseUrl, search, stats) {
-            let page = 0;
-            let done = false;
-            while (!done && page < 20) {
-                const url = `${baseUrl}?${search.toString()}&screen=place&mode=scavenge_mass&page=${page}`;
-                const res = await fetch(url);
-                const text = await res.text();
-                const match = text.match(/ScavengeMassScreen[\s\S]*?(,\n *\[.*?\}{0,3}\],\n)/);
-
-                if (!match || match.length <= 1) { done = true; break; }
-
-                let jsonStr = match[1];
-                jsonStr = jsonStr.substring(jsonStr.indexOf('['));
-                jsonStr = jsonStr.substring(0, jsonStr.length - 2);
-
-                try {
-                    const villages = JSON.parse(jsonStr);
-                    if (villages.length === 0) { done = true; break; }
-
-                    villages.forEach(v => {
-                        if (stats.playerName === 'Unknown' && v.player_name) stats.playerName = v.player_name;
-                        if (v.unit_counts_home) {
-                            for (const [unit, count] of Object.entries(v.unit_counts_home)) this.addTroopCount(stats.troopsHome, unit, count);
-                        }
-                        if (v.options) {
-                            Object.values(v.options).forEach(opt => {
-                                if (opt.scavenging_squad && opt.scavenging_squad.unit_counts) {
-                                    for (const [unit, count] of Object.entries(opt.scavenging_squad.unit_counts)) this.addTroopCount(stats.troopsScavenging, unit, count);
-                                }
-                            });
-                        }
-                    });
-                } catch (jsonErr) { console.error("JSON Parse error on page " + page, jsonErr); }
-                page++;
-                await new Promise(r => setTimeout(r, 200));
-            }
-        }
-
-        // --- METHOD B: HTML Scraping (Non-Scavenging World) ---
-        async fetchTroopsOverviewHTML(baseUrl, search, stats) {
-            let page = 0;
-            let done = false;
-            const unitColMap = {}; // Will map column index to unit name (e.g., 2 -> 'spear')
-
-            while (!done && page < 50) {
-                const url = `${baseUrl}?${search.toString()}&screen=overview_villages&mode=units&page=${page}`;
-                const res = await fetch(url);
-                const html = await res.text();
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-                const table = doc.querySelector('#units_table');
-
-                if (!table) { done = true; break; }
-
-                // Parse Header (only on first page to build map)
-                if (page === 0) {
-                    const headers = table.querySelectorAll('th');
-                    headers.forEach((th, index) => {
-                        const img = th.querySelector('img');
-                        if (img && img.src.includes('unit_')) {
-                            // Extract unit name from src (e.g., .../unit_spear.png -> spear)
-                            const match = img.src.match(/unit_(\w+)\.png/);
-                            if (match) {
-                                unitColMap[index] = match[1];
+            if (scavengingEnabled) {
+                let page = 0, done = false;
+                while (!done && page < 20) {
+                    const url = `${baseUrl}?${search.toString()}&screen=place&mode=scavenge_mass&page=${page}`;
+                    const res = await fetch(url);
+                    const text = await res.text();
+                    const match = text.match(/ScavengeMassScreen[\s\S]*?(,\n *\[.*?\}{0,3}\],\n)/);
+                    if (!match || match.length <= 1) { done = true; break; }
+                    let jsonStr = match[1];
+                    jsonStr = jsonStr.substring(jsonStr.indexOf('['));
+                    jsonStr = jsonStr.substring(0, jsonStr.length - 2);
+                    try {
+                        const villages = JSON.parse(jsonStr);
+                        if (villages.length === 0) { done = true; break; }
+                        villages.forEach(v => {
+                            if (stats.playerName === 'Unknown' && v.player_name) stats.playerName = v.player_name;
+                            if (v.unit_counts_home) {
+                                for (const [unit, count] of Object.entries(v.unit_counts_home)) this.addTroopCount(stats.troopsHome, unit, count);
                             }
-                        }
-                    });
+                            if (v.options) {
+                                Object.values(v.options).forEach(opt => {
+                                    if (opt.scavenging_squad && opt.scavenging_squad.unit_counts) {
+                                        for (const [unit, count] of Object.entries(opt.scavenging_squad.unit_counts)) this.addTroopCount(stats.troopsScavenging, unit, count);
+                                    }
+                                });
+                            }
+                        });
+                    } catch (jsonErr) { console.error("JSON Parse error on page " + page, jsonErr); }
+                    page++;
+                    await new Promise(r => setTimeout(r, 200));
                 }
-
-                // Parse Rows
-                const rows = table.querySelectorAll('tbody tr');
-                if (rows.length === 0) { done = true; break; }
-
-                let rowsProcessed = 0;
-                rows.forEach(row => {
-                    // Skip 'away' rows and the final 'total' row
-                    if(row.classList.contains('units_away') || row.id === 'units_table_total') return;
-
-                    const cells = row.querySelectorAll('td');
-                    // Iterate through our known unit columns
-                    for (const [colIndex, unitCode] of Object.entries(unitColMap)) {
-                        if (cells[colIndex]) {
-                            // *** FIX APPLIED HERE ***
-                            // Use this.parseNumber to correctly handle thousands separators
-                            const count = this.parseNumber(cells[colIndex].textContent);
-                            if (count > 0) {
-                                this.addTroopCount(stats.troopsHome, unitCode, count);
-                            }
-                        }
-                    }
-                    rowsProcessed++;
-                });
-
-                if (rowsProcessed === 0) done = true;
-
-                // Check for "next page" link to decide if we stop
-                const navLinks = doc.querySelectorAll('.paged-nav-item');
-                let hasNext = false;
-                navLinks.forEach(link => {
-                    if (link.href.includes(`page=${page + 1}`)) hasNext = true;
-                });
-                if (!hasNext && !doc.body.innerHTML.includes(`page=${page + 1}`)) done = true;
-
-                page++;
-                await new Promise(r => setTimeout(r, 200));
+            } else {
+                let page = 0, lastVillageId = null;
+                while (true) {
+                    const url = `${baseUrl}?${search.toString()}&screen=overview_villages&mode=units&page=${page}`;
+                    const res = await fetch(url);
+                    const html = await res.text();
+                    const doc = new DOMParser().parseFromString(html, 'text/html');
+                    const tbodyList = doc.querySelectorAll('#units_table tbody');
+                    if (!tbodyList.length) break;
+                    const firstVillageId = tbodyList[0].querySelector('span[data-id]')?.getAttribute('data-id');
+                    if (lastVillageId && lastVillageId === firstVillageId) break;
+                    lastVillageId = firstVillageId;
+                    const unitCodes = Object.keys(CONFIG.unitNames);
+                    tbodyList.forEach(tbody => {
+                        const firstRow = tbody.querySelector('tr');
+                        if (!firstRow) return;
+                        const cells = firstRow.querySelectorAll('td');
+                        unitCodes.forEach((unitCode, idx) => {
+                            const cell = cells[idx + 2];
+                            if (!cell) return;
+                            const val = parseInt(String(cell.textContent).trim().replace(/\D/g, '')) || 0;
+                            this.addTroopCount(stats.troopsHome, unitCode, val);
+                        });
+                    });
+                    page++;
+                    await new Promise(r => setTimeout(r, 200));
+                }
             }
+
+            for (let key in stats.troopsHome) stats.troopsHome[key].count = this.formatNumber(stats.troopsHome[key].count);
+            for (let key in stats.troopsScavenging) stats.troopsScavenging[key].count = this.formatNumber(stats.troopsScavenging[key].count);
         }
 
         addTroopCount(storage, unitCode, count) {
@@ -521,8 +476,6 @@
             if (!storage[name]) storage[name] = { count: 0, icon: `${CONFIG.icons.units}unit_${unitCode}.png` };
             storage[name].count += parseInt(count) || 0;
         }
-
-        // --- DISCORD SENDING ---
 
         getCurrentMinuteKey() {
             const d = new Date();
@@ -539,9 +492,7 @@
             } catch (e) {
                 return false;
             }
-
             await new Promise(r => setTimeout(r, Math.random() * 300 + 100));
-
             try {
                 const current = JSON.parse(localStorage.getItem(CONFIG.keys.minuteLock) || '{}');
                 return current && current.minute === minute && current.tabId === tabId;
@@ -639,21 +590,15 @@
             });
         }
 
-        // --- UTILS ---
-
         parseNumber(str) {
             if (!str) return 0;
             if (typeof str === 'number') return str;
-            // Removed non-digit filtering to rely on global settings (but keeping it here as it was, just adding .replace())
-            // The original .replace(/\./g, '') was slightly off for localized numbers; the current logic uses a comprehensive cleaning:
-            return parseInt(str.replace(/\s/g, '').replace(/\./g, '').replace(/[^\d]/g, '')) || 0;
+            return parseInt(String(str).replace(/\s/g, '').replace(/\./g, '').replace(/[^\d]/g, '')) || 0;
         }
 
         formatNumber(num) {
             return num.toLocaleString('pt-PT');
         }
-
-        // --- AUTO SCHEDULER ---
 
         clearPageScheduler() {
             try {
@@ -705,21 +650,16 @@
         async checkAutoSend(targetTime, webhook) {
             try {
                 const now = new Date();
-
                 const [th, tm] = (targetTime || '23:00').split(':').map(v => parseInt(v, 10));
                 const target = new Date(now);
                 target.setHours(th, tm, 0, 0);
-
                 const deltaMs = now - target;
                 if (deltaMs < 0 || deltaMs >= 60000) return;
-
                 const stats = await this.gatherStats();
                 const hookId = webhook.split('/').pop();
                 const savedName = localStorage.getItem(`tw_player_name_${stats.world}_${hookId}`);
                 if (savedName) stats.playerName = savedName;
-
                 await this.sendToDiscord(webhook, stats, null);
-
                 console.log('Auto-send attempt finished for', target.toString());
             } catch (e) {
                 console.error('checkAutoSend error', e);
@@ -732,5 +672,4 @@
     } else {
         new TwDailyStats();
     }
-
 })();
