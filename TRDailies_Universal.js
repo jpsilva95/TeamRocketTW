@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (v8.0)
+// @name         Mystery Inc. Dailies (v8.1 Fix)
 // @namespace    http://tampermonkey.net
-// @version      5.5
-// @description  Send daily farm, resource stats, and troop counts to Discord (handles scavenging/non-scavenging worlds, hides 0 troop counts, fixed scheduler locks)
+// @version      8.1
+// @description  Send daily farm, resource stats, and troop counts to Discord (Dynamic unit detection fixed)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -52,7 +52,7 @@
     }
 
     const CONFIG = {
-        ver: '5.5',
+        ver: '8.1',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -72,7 +72,7 @@
             'spear': 'Spear', 'sword': 'Sword', 'axe': 'Axe', 'archer': 'Archer',
             'spy': 'Spy', 'light': 'Light Cav', 'marcher': 'Mounted Archer',
             'heavy': 'Heavy Cav', 'ram': 'Ram', 'catapult': 'Catapult',
-            'knight': 'Paladin', 'snob': 'Noble'
+            'knight': 'Paladin', 'snob': 'Noble', 'militia': 'Militia'
         }
     };
 
@@ -443,21 +443,43 @@
                     const res = await fetch(url);
                     const html = await res.text();
                     const doc = new DOMParser().parseFromString(html, 'text/html');
-                    const tbodyList = doc.querySelectorAll('#units_table tbody');
+                    const unitsTable = doc.querySelector('#units_table');
+                    if (!unitsTable) break;
+
+                    const tbodyList = unitsTable.querySelectorAll('tbody');
                     if (!tbodyList.length) break;
+
                     const firstVillageId = tbodyList[0].querySelector('span[data-id]')?.getAttribute('data-id');
                     if (lastVillageId && lastVillageId === firstVillageId) break;
                     lastVillageId = firstVillageId;
-                    const unitCodes = Object.keys(CONFIG.unitNames);
+
+                    // FIX: Dynamic Header Mapping
+                    // This creates a map where Index 0 maps to 'spear', Index 3 to 'archer', etc.
+                    // If a world doesn't have archers, that index simply won't be mapped, preventing errors.
+                    const columnMap = {};
+                    const headers = unitsTable.querySelectorAll('thead tr:last-child th');
+                    headers.forEach((th, index) => {
+                        const img = th.querySelector('img');
+                        if (img && img.src) {
+                             // Tries to find "unit_spear.png" inside the src string
+                             const match = img.src.match(/unit_(\w+)\.png/);
+                             if (match) {
+                                 columnMap[index] = match[1];
+                             }
+                        }
+                    });
+
                     tbodyList.forEach(tbody => {
                         const firstRow = tbody.querySelector('tr');
                         if (!firstRow) return;
                         const cells = firstRow.querySelectorAll('td');
-                        unitCodes.forEach((unitCode, idx) => {
-                            const cell = cells[idx + 2];
-                            if (!cell) return;
-                            const val = parseInt(String(cell.textContent).trim().replace(/\D/g, '')) || 0;
-                            this.addTroopCount(stats.troopsHome, unitCode, val);
+
+                        cells.forEach((cell, idx) => {
+                            // Only try to read if this specific column index was mapped to a unit name in the header
+                            if (columnMap[idx]) {
+                                const val = parseInt(String(cell.textContent).trim().replace(/\D/g, '')) || 0;
+                                this.addTroopCount(stats.troopsHome, columnMap[idx], val);
+                            }
                         });
                     });
                     page++;
@@ -639,37 +661,28 @@
             const delay = (60 - now.getSeconds()) * 1000;
 
             window.__twDailyScheduler.timeoutId = setTimeout(() => {
-                this.checkAutoSend(time, webhook);
-                window.__twDailyScheduler.intervalId = setInterval(() => this.checkAutoSend(time, webhook), 60000);
+                const check = () => {
+                    const current = new Date();
+                    const currentStr = current.toTimeString().slice(0, 5);
+                    const lastSent = localStorage.getItem(CONFIG.keys.lastAutoDate);
+                    const today = current.toDateString();
+
+                    if (currentStr === time && lastSent !== today) {
+                        console.log('Mystery Inc: Auto-sending stats...');
+                        localStorage.setItem(CONFIG.keys.lastAutoDate, today);
+                        this.gatherStats().then(stats => {
+                            const url = localStorage.getItem(CONFIG.keys.webhook);
+                            if (url) this.sendToDiscord(url, stats, null);
+                        });
+                    }
+                };
+                check();
+                window.__twDailyScheduler.intervalId = setInterval(check, 60000);
+                window.__twDailyScheduler.active = true;
             }, delay);
-
-            window.__twDailyScheduler.active = true;
-            console.log('Auto scheduler initialized (active:', window.__twDailyScheduler.active, ')');
-        }
-
-        async checkAutoSend(targetTime, webhook) {
-            try {
-                const now = new Date();
-                const [th, tm] = (targetTime || '23:00').split(':').map(v => parseInt(v, 10));
-                const target = new Date(now);
-                target.setHours(th, tm, 0, 0);
-                const deltaMs = now - target;
-                if (deltaMs < 0 || deltaMs >= 60000) return;
-                const stats = await this.gatherStats();
-                const hookId = webhook.split('/').pop();
-                const savedName = localStorage.getItem(`tw_player_name_${stats.world}_${hookId}`);
-                if (savedName) stats.playerName = savedName;
-                await this.sendToDiscord(webhook, stats, null);
-                console.log('Auto-send attempt finished for', target.toString());
-            } catch (e) {
-                console.error('checkAutoSend error', e);
-            }
         }
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => new TwDailyStats());
-    } else {
-        new TwDailyStats();
-    }
+    new TwDailyStats();
+
 })();
