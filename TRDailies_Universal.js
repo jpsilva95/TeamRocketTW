@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (v8.1 Fix)
+// @name         Mystery Inc. Dailies (v8.2 Config Fix)
 // @namespace    http://tampermonkey.net
-// @version      8.1
-// @description  Send daily farm, resource stats, and troop counts to Discord (Dynamic unit detection fixed)
+// @version      8.2
+// @description  Send daily farm, resource stats, and troop counts to Discord (Uses native game_data for unit detection)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -52,7 +52,7 @@
     }
 
     const CONFIG = {
-        ver: '8.1',
+        ver: '8.2',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -68,6 +68,7 @@
             button: 'https://i.ibb.co/x8JQX8yS/ex1.png',
             units: 'https://dspt.innogamescdn.com/asset/caf5a096/graphic/unit/'
         },
+        // Display names map
         unitNames: {
             'spear': 'Spear', 'sword': 'Sword', 'axe': 'Axe', 'archer': 'Archer',
             'spy': 'Spy', 'light': 'Light Cav', 'marcher': 'Mounted Archer',
@@ -389,23 +390,35 @@
             } catch (e) { console.error(e); }
         }
 
-        async checkScavengingEnabled(baseUrl) {
-            try {
+        async getWorldConfig(baseUrl) {
+             try {
                 const root = baseUrl.replace(/game\.php.*/, '');
                 const res = await fetch(`${root}interface.php?func=get_config`);
                 const xml = new DOMParser().parseFromString(await res.text(), 'text/xml');
                 const scav = xml.querySelector('config > game > scavenging');
-                return scav && scav.textContent.trim() === "1";
+                return {
+                    scavenging: scav && scav.textContent.trim() === "1"
+                };
             } catch (e) {
-                console.error("Error checking scavenging config", e);
-                return true;
+                console.error("Error checking config", e);
+                return { scavenging: true };
             }
         }
 
         async fetchTroopCounts(baseUrl, search, stats) {
-            const scavengingEnabled = await this.checkScavengingEnabled(baseUrl);
+            const config = await this.getWorldConfig(baseUrl);
 
-            if (scavengingEnabled) {
+            // Get valid units from game_data (removes militia/snob if needed)
+            // We filter militia out because usually we don't care about counting it for reports
+            let validUnits = [];
+            if (typeof game_data !== 'undefined' && game_data.units) {
+                 validUnits = game_data.units.filter(u => u !== 'militia');
+            } else {
+                // Fallback if game_data isn't available for some reason (rare)
+                validUnits = ['spear','sword','axe','spy','light','heavy','ram','catapult','knight','snob'];
+            }
+
+            if (config.scavenging) {
                 let page = 0, done = false;
                 while (!done && page < 20) {
                     const url = `${baseUrl}?${search.toString()}&screen=place&mode=scavenge_mass&page=${page}`;
@@ -422,12 +435,17 @@
                         villages.forEach(v => {
                             if (stats.playerName === 'Unknown' && v.player_name) stats.playerName = v.player_name;
                             if (v.unit_counts_home) {
-                                for (const [unit, count] of Object.entries(v.unit_counts_home)) this.addTroopCount(stats.troopsHome, unit, count);
+                                for (const [unit, count] of Object.entries(v.unit_counts_home)) {
+                                     // Only add if it's a valid unit for this world
+                                     if(validUnits.includes(unit)) this.addTroopCount(stats.troopsHome, unit, count);
+                                }
                             }
                             if (v.options) {
                                 Object.values(v.options).forEach(opt => {
                                     if (opt.scavenging_squad && opt.scavenging_squad.unit_counts) {
-                                        for (const [unit, count] of Object.entries(opt.scavenging_squad.unit_counts)) this.addTroopCount(stats.troopsScavenging, unit, count);
+                                        for (const [unit, count] of Object.entries(opt.scavenging_squad.unit_counts)) {
+                                             if(validUnits.includes(unit)) this.addTroopCount(stats.troopsScavenging, unit, count);
+                                        }
                                     }
                                 });
                             }
@@ -437,6 +455,7 @@
                     await new Promise(r => setTimeout(r, 200));
                 }
             } else {
+                // Non-scavenging world (e.g., older classic worlds)
                 let page = 0, lastVillageId = null;
                 while (true) {
                     const url = `${baseUrl}?${search.toString()}&screen=overview_villages&mode=units&page=${page}`;
@@ -453,33 +472,23 @@
                     if (lastVillageId && lastVillageId === firstVillageId) break;
                     lastVillageId = firstVillageId;
 
-                    // FIX: Dynamic Header Mapping
-                    // This creates a map where Index 0 maps to 'spear', Index 3 to 'archer', etc.
-                    // If a world doesn't have archers, that index simply won't be mapped, preventing errors.
-                    const columnMap = {};
-                    const headers = unitsTable.querySelectorAll('thead tr:last-child th');
-                    headers.forEach((th, index) => {
-                        const img = th.querySelector('img');
-                        if (img && img.src) {
-                             // Tries to find "unit_spear.png" inside the src string
-                             const match = img.src.match(/unit_(\w+)\.png/);
-                             if (match) {
-                                 columnMap[index] = match[1];
-                             }
-                        }
-                    });
-
                     tbodyList.forEach(tbody => {
                         const firstRow = tbody.querySelector('tr');
                         if (!firstRow) return;
                         const cells = firstRow.querySelectorAll('td');
 
-                        cells.forEach((cell, idx) => {
-                            // Only try to read if this specific column index was mapped to a unit name in the header
-                            if (columnMap[idx]) {
-                                const val = parseInt(String(cell.textContent).trim().replace(/\D/g, '')) || 0;
-                                this.addTroopCount(stats.troopsHome, columnMap[idx], val);
-                            }
+                        // The first few cells are village info, troops start after that.
+                        // usually index 0 is checkbox, 1 is village name.
+                        // We skip those. The exact start depends on the page layout,
+                        // but usually troops correspond to the validUnits list in order.
+                        const startColIndex = 2; 
+
+                        validUnits.forEach((unitCode, idx) => {
+                             const cell = cells[startColIndex + idx];
+                             if (cell) {
+                                 const val = parseInt(String(cell.textContent).trim().replace(/\D/g, '')) || 0;
+                                 this.addTroopCount(stats.troopsHome, unitCode, val);
+                             }
                         });
                     });
                     page++;
