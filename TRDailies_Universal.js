@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (v8.2 Config Fix)
+// @name         Mystery Inc. Dailies (v8.3 Clean UI)
 // @namespace    http://tampermonkey.net
-// @version      8.2
-// @description  Send daily farm, resource stats, and troop counts to Discord (Uses native game_data for unit detection)
+// @version      8.3
+// @description  Send daily farm, resource stats, and troop counts to Discord (Hides scavenging stats on non-scavenging worlds)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -52,7 +52,7 @@
     }
 
     const CONFIG = {
-        ver: '8.2',
+        ver: '8.3',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -68,7 +68,6 @@
             button: 'https://i.ibb.co/x8JQX8yS/ex1.png',
             units: 'https://dspt.innogamescdn.com/asset/caf5a096/graphic/unit/'
         },
-        // Display names map
         unitNames: {
             'spear': 'Spear', 'sword': 'Sword', 'axe': 'Axe', 'archer': 'Archer',
             'spy': 'Spy', 'light': 'Light Cav', 'marcher': 'Mounted Archer',
@@ -296,11 +295,21 @@
             };
 
             const troopsHomeHtml = generateTroopHtml(stats.troopsHome, '⚔️ Total Troops at Home:');
-            const troopsScavHtml = generateTroopHtml(stats.troopsScavenging, '🔍 Total Troops Scavenging:');
+            
+            // UI Change: Only show Scavenging troops if enabled
+            let troopsScavHtml = '';
+            if (stats.scavengingEnabled) {
+                troopsScavHtml = generateTroopHtml(stats.troopsScavenging, '🔍 Total Troops Scavenging:');
+            }
 
             let nameInput = '';
             if (stats.playerName === 'Unknown') {
                 nameInput = `<div style="margin: 10px 0; padding: 10px; background: #ED4245; border-radius: 4px;"><p style="margin: 0 0 5px 0; font-size: 12px; color: white;"><strong>⚠️ Player name not detected</strong></p><input type="text" id="manualPlayerName" placeholder="Enter your player name" style="width: 100%; padding: 6px; border: 1px solid #40444B; background: #40444B; color: #DCDDDE; border-radius: 4px; box-sizing: border-box; font-size: 13px;"></div>`;
+            }
+
+            let gatherHtml = '';
+            if (stats.scavengingEnabled) {
+                gatherHtml = `<p style="margin: 5px 0;"><strong>📦 Daily Resources Total:</strong> ${stats.gatherTotal}</p>`;
             }
 
             container.innerHTML = `
@@ -308,7 +317,7 @@
                 <p style="margin: 5px 0;"><strong>👤 Player:</strong> ${stats.playerName}</p>
                 ${nameInput}
                 <p style="margin: 5px 0;"><strong>🌾 Daily Farm Total:</strong> ${stats.farmTotal}</p>
-                <p style="margin: 5px 0;"><strong>📦 Daily Resources Total:</strong> ${stats.gatherTotal}</p>
+                ${gatherHtml}
                 <p style="margin: 10px 0 5px 0; border-top: 1px solid #2C2F33; padding-top: 10px;"><strong>💰 Grand Total:</strong> ${stats.grandTotal}</p>
                 ${troopsHomeHtml}
                 ${troopsScavHtml}
@@ -323,7 +332,8 @@
                 playerName: 'Unknown',
                 troopsHome: {},
                 troopsScavenging: {},
-                world: 'Unknown'
+                world: 'Unknown',
+                scavengingEnabled: false
             };
 
             const baseUrl = window.location.origin + window.location.pathname;
@@ -331,17 +341,28 @@
             const worldMatch = window.location.hostname.match(/^(\w+)\./);
             stats.world = worldMatch ? worldMatch[1].toUpperCase() : 'Unknown';
 
+            // Check config FIRST
+            const config = await this.getWorldConfig(baseUrl);
+            stats.scavengingEnabled = config.scavenging;
+
             await this.fetchPlayerName(baseUrl, search, stats);
             await this.fetchLootStats(baseUrl, search, stats);
-            await this.fetchScavengeStats(baseUrl, search, stats);
 
-            if (stats.gatherTotal !== 'N/A' && stats.farmTotal !== 'N/A') {
-                const gather = this.parseNumber(stats.gatherTotal);
-                const farm = this.parseNumber(stats.farmTotal);
-                stats.grandTotal = this.formatNumber(gather + farm);
+            if (stats.scavengingEnabled) {
+                await this.fetchScavengeStats(baseUrl, search, stats);
             }
 
-            await this.fetchTroopCounts(baseUrl, search, stats);
+            // Clean Grand Total Logic
+            const farm = this.parseNumber(stats.farmTotal);
+            if (stats.scavengingEnabled) {
+                const gather = this.parseNumber(stats.gatherTotal);
+                stats.grandTotal = this.formatNumber(gather + farm);
+            } else {
+                stats.grandTotal = this.formatNumber(farm);
+            }
+
+            // Pass config so we don't fetch it again
+            await this.fetchTroopCounts(baseUrl, search, stats, config);
             return stats;
         }
 
@@ -405,16 +426,12 @@
             }
         }
 
-        async fetchTroopCounts(baseUrl, search, stats) {
-            const config = await this.getWorldConfig(baseUrl);
-
+        async fetchTroopCounts(baseUrl, search, stats, config) {
             // Get valid units from game_data (removes militia/snob if needed)
-            // We filter militia out because usually we don't care about counting it for reports
             let validUnits = [];
             if (typeof game_data !== 'undefined' && game_data.units) {
                  validUnits = game_data.units.filter(u => u !== 'militia');
             } else {
-                // Fallback if game_data isn't available for some reason (rare)
                 validUnits = ['spear','sword','axe','spy','light','heavy','ram','catapult','knight','snob'];
             }
 
@@ -436,7 +453,6 @@
                             if (stats.playerName === 'Unknown' && v.player_name) stats.playerName = v.player_name;
                             if (v.unit_counts_home) {
                                 for (const [unit, count] of Object.entries(v.unit_counts_home)) {
-                                     // Only add if it's a valid unit for this world
                                      if(validUnits.includes(unit)) this.addTroopCount(stats.troopsHome, unit, count);
                                 }
                             }
@@ -455,7 +471,6 @@
                     await new Promise(r => setTimeout(r, 200));
                 }
             } else {
-                // Non-scavenging world (e.g., older classic worlds)
                 let page = 0, lastVillageId = null;
                 while (true) {
                     const url = `${baseUrl}?${search.toString()}&screen=overview_villages&mode=units&page=${page}`;
@@ -476,11 +491,6 @@
                         const firstRow = tbody.querySelector('tr');
                         if (!firstRow) return;
                         const cells = firstRow.querySelectorAll('td');
-
-                        // The first few cells are village info, troops start after that.
-                        // usually index 0 is checkbox, 1 is village name.
-                        // We skip those. The exact start depends on the page layout,
-                        // but usually troops correspond to the validUnits list in order.
                         const startColIndex = 2; 
 
                         validUnits.forEach((unitCode, idx) => {
@@ -558,10 +568,15 @@
             const fields = [
                 { name: 'Player', value: '👤 ' + (stats.playerName || 'Unknown'), inline: false },
                 { name: 'World', value: '🌍 ' + (stats.world || 'Unknown'), inline: false },
-                { name: 'Daily Farm Total', value: '🌾 ' + (stats.farmTotal || '0'), inline: true },
-                { name: 'Daily Resources Total', value: '📦 ' + (stats.gatherTotal || '0'), inline: true },
-                { name: 'Grand Total', value: '💰 ' + (stats.grandTotal || '0'), inline: false }
+                { name: 'Daily Farm Total', value: '🌾 ' + (stats.farmTotal || '0'), inline: true }
             ];
+
+            // Discord Change: Only add Gather and Scavenging Troops if enabled
+            if (stats.scavengingEnabled) {
+                fields.push({ name: 'Daily Resources Total', value: '📦 ' + (stats.gatherTotal || '0'), inline: true });
+            }
+
+            fields.push({ name: 'Grand Total', value: '💰 ' + (stats.grandTotal || '0'), inline: false });
 
             const formatTroopString = (troopObj) => {
                 let str = '';
@@ -577,8 +592,10 @@
             const homeStr = formatTroopString(stats.troopsHome);
             if (homeStr.length > 0 && homeStr.length < 1024) fields.push({ name: '⚔️ Troops at Home', value: homeStr, inline: false });
 
-            const scavStr = formatTroopString(stats.troopsScavenging);
-            if (scavStr.length > 0 && scavStr.length < 1024) fields.push({ name: '🔍 Troops Scavenging', value: scavStr, inline: false });
+            if (stats.scavengingEnabled) {
+                const scavStr = formatTroopString(stats.troopsScavenging);
+                if (scavStr.length > 0 && scavStr.length < 1024) fields.push({ name: '🔍 Troops Scavenging', value: scavStr, inline: false });
+            }
 
             const payload = JSON.stringify({
                 embeds: [{
