@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (v8.3 Clean UI)
+// @name         Mystery Inc. Dailies (v8.4 Stealth)
 // @namespace    http://tampermonkey.net
-// @version      8.3
-// @description  Send daily farm, resource stats, and troop counts to Discord (Hides scavenging stats on non-scavenging worlds)
+// @version      8.4
+// @description  Send daily farm, resource stats, and troop counts to Discord (Safe randomized delays to avoid detection)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -52,7 +52,7 @@
     }
 
     const CONFIG = {
-        ver: '8.3',
+        ver: '8.4',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
@@ -81,6 +81,12 @@
             this.checkVersion();
             this.initUI();
             this.initAutoScheduler();
+        }
+
+        // --- Helper: Randomized Delay for Safety ---
+        async sleepRandom(min, max) {
+            const ms = Math.floor(Math.random() * (max - min + 1) + min);
+            return new Promise(resolve => setTimeout(resolve, ms));
         }
 
         checkVersion() {
@@ -218,7 +224,6 @@
             overlay.appendChild(modal);
             document.body.appendChild(overlay);
 
-            // Modal logic
             webhookInput.value = localStorage.getItem(CONFIG.keys.webhook) || '';
             autoCheck.checked = localStorage.getItem(CONFIG.keys.autoEnabled) === 'true';
             autoTime.value = localStorage.getItem(CONFIG.keys.autoTime) || '23:00';
@@ -295,8 +300,6 @@
             };
 
             const troopsHomeHtml = generateTroopHtml(stats.troopsHome, '⚔️ Total Troops at Home:');
-            
-            // UI Change: Only show Scavenging troops if enabled
             let troopsScavHtml = '';
             if (stats.scavengingEnabled) {
                 troopsScavHtml = generateTroopHtml(stats.troopsScavenging, '🔍 Total Troops Scavenging:');
@@ -341,18 +344,22 @@
             const worldMatch = window.location.hostname.match(/^(\w+)\./);
             stats.world = worldMatch ? worldMatch[1].toUpperCase() : 'Unknown';
 
-            // Check config FIRST
             const config = await this.getWorldConfig(baseUrl);
             stats.scavengingEnabled = config.scavenging;
+            
+            // Random pause between config fetch and next step
+            await this.sleepRandom(100, 300);
 
             await this.fetchPlayerName(baseUrl, search, stats);
+            await this.sleepRandom(150, 350); // Pause
+
             await this.fetchLootStats(baseUrl, search, stats);
 
             if (stats.scavengingEnabled) {
+                await this.sleepRandom(150, 350); // Pause if scavenging enabled
                 await this.fetchScavengeStats(baseUrl, search, stats);
             }
 
-            // Clean Grand Total Logic
             const farm = this.parseNumber(stats.farmTotal);
             if (stats.scavengingEnabled) {
                 const gather = this.parseNumber(stats.gatherTotal);
@@ -361,7 +368,7 @@
                 stats.grandTotal = this.formatNumber(farm);
             }
 
-            // Pass config so we don't fetch it again
+            await this.sleepRandom(150, 350); // Pause before heavy lifting
             await this.fetchTroopCounts(baseUrl, search, stats, config);
             return stats;
         }
@@ -427,7 +434,6 @@
         }
 
         async fetchTroopCounts(baseUrl, search, stats, config) {
-            // Get valid units from game_data (removes militia/snob if needed)
             let validUnits = [];
             if (typeof game_data !== 'undefined' && game_data.units) {
                  validUnits = game_data.units.filter(u => u !== 'militia');
@@ -438,15 +444,17 @@
             if (config.scavenging) {
                 let page = 0, done = false;
                 while (!done && page < 20) {
-                    const url = `${baseUrl}?${search.toString()}&screen=place&mode=scavenge_mass&page=${page}`;
-                    const res = await fetch(url);
-                    const text = await res.text();
-                    const match = text.match(/ScavengeMassScreen[\s\S]*?(,\n *\[.*?\}{0,3}\],\n)/);
-                    if (!match || match.length <= 1) { done = true; break; }
-                    let jsonStr = match[1];
-                    jsonStr = jsonStr.substring(jsonStr.indexOf('['));
-                    jsonStr = jsonStr.substring(0, jsonStr.length - 2);
                     try {
+                        const url = `${baseUrl}?${search.toString()}&screen=place&mode=scavenge_mass&page=${page}`;
+                        const res = await fetch(url);
+                        if (!res.ok) throw new Error('Network response not ok');
+                        const text = await res.text();
+                        const match = text.match(/ScavengeMassScreen[\s\S]*?(,\n *\[.*?\}{0,3}\],\n)/);
+                        if (!match || match.length <= 1) { done = true; break; }
+                        let jsonStr = match[1];
+                        jsonStr = jsonStr.substring(jsonStr.indexOf('['));
+                        jsonStr = jsonStr.substring(0, jsonStr.length - 2);
+                        
                         const villages = JSON.parse(jsonStr);
                         if (villages.length === 0) { done = true; break; }
                         villages.forEach(v => {
@@ -466,43 +474,55 @@
                                 });
                             }
                         });
-                    } catch (jsonErr) { console.error("JSON Parse error on page " + page, jsonErr); }
+                    } catch (e) {
+                        console.error(`Error on scavenge page ${page}`, e);
+                        // If error, maybe wait a bit longer before trying next page or just break
+                        await this.sleepRandom(1000, 2000); 
+                    }
                     page++;
-                    await new Promise(r => setTimeout(r, 200));
+                    // Randomized wait: 300ms to 500ms
+                    await this.sleepRandom(300, 500);
                 }
             } else {
                 let page = 0, lastVillageId = null;
                 while (true) {
-                    const url = `${baseUrl}?${search.toString()}&screen=overview_villages&mode=units&page=${page}`;
-                    const res = await fetch(url);
-                    const html = await res.text();
-                    const doc = new DOMParser().parseFromString(html, 'text/html');
-                    const unitsTable = doc.querySelector('#units_table');
-                    if (!unitsTable) break;
+                    try {
+                        const url = `${baseUrl}?${search.toString()}&screen=overview_villages&mode=units&page=${page}`;
+                        const res = await fetch(url);
+                        if (!res.ok) throw new Error('Network response not ok');
+                        const html = await res.text();
+                        const doc = new DOMParser().parseFromString(html, 'text/html');
+                        const unitsTable = doc.querySelector('#units_table');
+                        if (!unitsTable) break;
 
-                    const tbodyList = unitsTable.querySelectorAll('tbody');
-                    if (!tbodyList.length) break;
+                        const tbodyList = unitsTable.querySelectorAll('tbody');
+                        if (!tbodyList.length) break;
 
-                    const firstVillageId = tbodyList[0].querySelector('span[data-id]')?.getAttribute('data-id');
-                    if (lastVillageId && lastVillageId === firstVillageId) break;
-                    lastVillageId = firstVillageId;
+                        const firstVillageId = tbodyList[0].querySelector('span[data-id]')?.getAttribute('data-id');
+                        if (lastVillageId && lastVillageId === firstVillageId) break;
+                        lastVillageId = firstVillageId;
 
-                    tbodyList.forEach(tbody => {
-                        const firstRow = tbody.querySelector('tr');
-                        if (!firstRow) return;
-                        const cells = firstRow.querySelectorAll('td');
-                        const startColIndex = 2; 
+                        tbodyList.forEach(tbody => {
+                            const firstRow = tbody.querySelector('tr');
+                            if (!firstRow) return;
+                            const cells = firstRow.querySelectorAll('td');
+                            const startColIndex = 2; 
 
-                        validUnits.forEach((unitCode, idx) => {
-                             const cell = cells[startColIndex + idx];
-                             if (cell) {
-                                 const val = parseInt(String(cell.textContent).trim().replace(/\D/g, '')) || 0;
-                                 this.addTroopCount(stats.troopsHome, unitCode, val);
-                             }
+                            validUnits.forEach((unitCode, idx) => {
+                                const cell = cells[startColIndex + idx];
+                                if (cell) {
+                                    const val = parseInt(String(cell.textContent).trim().replace(/\D/g, '')) || 0;
+                                    this.addTroopCount(stats.troopsHome, unitCode, val);
+                                }
+                            });
                         });
-                    });
+                    } catch (e) {
+                        console.error(`Error on overview page ${page}`, e);
+                        await this.sleepRandom(1000, 2000); 
+                    }
                     page++;
-                    await new Promise(r => setTimeout(r, 200));
+                    // Randomized wait: 300ms to 500ms
+                    await this.sleepRandom(300, 500);
                 }
             }
 
@@ -571,7 +591,6 @@
                 { name: 'Daily Farm Total', value: '🌾 ' + (stats.farmTotal || '0'), inline: true }
             ];
 
-            // Discord Change: Only add Gather and Scavenging Troops if enabled
             if (stats.scavengingEnabled) {
                 fields.push({ name: 'Daily Resources Total', value: '📦 ' + (stats.gatherTotal || '0'), inline: true });
             }
