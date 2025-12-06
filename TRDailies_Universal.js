@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (v8.4 Stealth)
+// @name         Mystery Inc. Dailies (v8.5 Auto-Fix)
 // @namespace    http://tampermonkey.net
-// @version      8.4
-// @description  Send daily farm, resource stats, and troop counts to Discord (Safe randomized delays to avoid detection)
+// @version      8.5
+// @description  Send daily farm, resource stats, and troop counts to Discord (Fixed auto-send duplicates and speed)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -17,52 +17,19 @@
 
     const IS_TAMPERMONKEY = (typeof GM_info !== 'undefined') || (typeof GM_xmlhttpRequest !== 'undefined');
 
-    if (window.__twDailyInstanceActive) {
-        console.log('Mystery Inc: Script instance already active — aborting.');
-        return;
-    }
+    // Prevent multiple instances in the same tab (e.g. if script runs on page load + bookmarklet)
+    if (window.__twDailyInstanceActive) return;
     window.__twDailyInstanceActive = true;
 
-    if (!IS_TAMPERMONKEY) {
-        if (window.__twDailyBookmarkletLoaded) {
-            console.log('Mystery Inc: Bookmarklet already active — aborting reinjection.');
-            return;
-        }
-        window.__twDailyBookmarkletLoaded = true;
-    }
-
-    window.__twDailyScheduler = window.__twDailyScheduler || {
-        timeoutId: null,
-        intervalId: null,
-        active: false,
-        inProgress: false
-    };
-
-    function acquireGlobalSendLock() {
-        try {
-            const lockKey = 'tw_global_send_lock_minute';
-            const currentMinute = Math.floor(Date.now() / 60000);
-            const stored = Number(localStorage.getItem(lockKey));
-            if (stored === currentMinute) return false;
-            localStorage.setItem(lockKey, String(currentMinute));
-            return true;
-        } catch {
-            return true;
-        }
-    }
-
     const CONFIG = {
-        ver: '8.4',
+        ver: '8.5',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
             autoEnabled: 'tw_auto_send_enabled',
             autoTime: 'tw_auto_send_time',
             lastAutoDate: 'tw_last_auto_send',
-            sentMarker: 'tw_daily_sent_marker',
-            sendingMarker: 'tw_daily_sending_marker',
-            intentMarker: 'tw_daily_intent_marker',
-            minuteLock: 'tw_send_minute_lock'
+            masterLock: 'tw_daily_master_lock' // New single lock key
         },
         icons: {
             button: 'https://i.ibb.co/x8JQX8yS/ex1.png',
@@ -83,7 +50,6 @@
             this.initAutoScheduler();
         }
 
-        // --- Helper: Randomized Delay for Safety ---
         async sleepRandom(min, max) {
             const ms = Math.floor(Math.random() * (max - min + 1) + min);
             return new Promise(resolve => setTimeout(resolve, ms));
@@ -92,14 +58,8 @@
         checkVersion() {
             const lastVer = localStorage.getItem(CONFIG.keys.version);
             if (lastVer !== CONFIG.ver) {
-                console.log(`New script version: ${CONFIG.ver} (was: ${lastVer})`);
+                console.log(`Mystery Inc: Updated to v${CONFIG.ver}`);
                 localStorage.setItem(CONFIG.keys.version, CONFIG.ver);
-                try {
-                    localStorage.removeItem(CONFIG.keys.sentMarker);
-                    localStorage.removeItem(CONFIG.keys.sendingMarker);
-                    localStorage.removeItem(CONFIG.keys.intentMarker);
-                    localStorage.removeItem(CONFIG.keys.lastAutoDate);
-                } catch {}
             }
         }
 
@@ -248,6 +208,7 @@
             closeBtn.onclick = () => document.body.removeChild(overlay);
             overlay.onclick = (e) => { if (e.target === overlay) document.body.removeChild(overlay); };
 
+            // Preview Load
             this.gatherStats().then(stats => {
                 this.renderPreview(stats, preview);
             }).catch(err => {
@@ -344,19 +305,18 @@
             const worldMatch = window.location.hostname.match(/^(\w+)\./);
             stats.world = worldMatch ? worldMatch[1].toUpperCase() : 'Unknown';
 
+            // 1. Get Config
             const config = await this.getWorldConfig(baseUrl);
             stats.scavengingEnabled = config.scavenging;
-            
-            // Random pause between config fetch and next step
-            await this.sleepRandom(100, 300);
 
-            await this.fetchPlayerName(baseUrl, search, stats);
-            await this.sleepRandom(150, 350); // Pause
+            // 2. Fetch Base Info (Fast)
+            await Promise.all([
+                this.fetchPlayerName(baseUrl, search, stats),
+                this.fetchLootStats(baseUrl, search, stats)
+            ]);
 
-            await this.fetchLootStats(baseUrl, search, stats);
-
+            // 3. Fetch Scavenge (Fast)
             if (stats.scavengingEnabled) {
-                await this.sleepRandom(150, 350); // Pause if scavenging enabled
                 await this.fetchScavengeStats(baseUrl, search, stats);
             }
 
@@ -368,7 +328,8 @@
                 stats.grandTotal = this.formatNumber(farm);
             }
 
-            await this.sleepRandom(150, 350); // Pause before heavy lifting
+            // 4. Fetch Troops (Heavier - Paging)
+            // Reduced delays here to speed it up while keeping it safe
             await this.fetchTroopCounts(baseUrl, search, stats, config);
             return stats;
         }
@@ -476,12 +437,11 @@
                         });
                     } catch (e) {
                         console.error(`Error on scavenge page ${page}`, e);
-                        // If error, maybe wait a bit longer before trying next page or just break
-                        await this.sleepRandom(1000, 2000); 
+                        await this.sleepRandom(500, 1000); 
                     }
                     page++;
-                    // Randomized wait: 300ms to 500ms
-                    await this.sleepRandom(300, 500);
+                    // Faster paging delay (150-300ms is enough to be polite but fast)
+                    await this.sleepRandom(150, 300);
                 }
             } else {
                 let page = 0, lastVillageId = null;
@@ -518,11 +478,11 @@
                         });
                     } catch (e) {
                         console.error(`Error on overview page ${page}`, e);
-                        await this.sleepRandom(1000, 2000); 
+                        await this.sleepRandom(500, 1000); 
                     }
                     page++;
-                    // Randomized wait: 300ms to 500ms
-                    await this.sleepRandom(300, 500);
+                    // Faster paging delay
+                    await this.sleepRandom(150, 300);
                 }
             }
 
@@ -538,53 +498,7 @@
             storage[name].count += parseInt(count) || 0;
         }
 
-        getCurrentMinuteKey() {
-            const d = new Date();
-            d.setSeconds(0, 0);
-            return d.toISOString().slice(0, 16);
-        }
-
-        async attemptMinuteLock() {
-            const minute = this.getCurrentMinuteKey();
-            const tabId = 'tab_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-            const payload = { minute, tabId, ts: Date.now() };
-            try {
-                localStorage.setItem(CONFIG.keys.minuteLock, JSON.stringify(payload));
-            } catch (e) {
-                return false;
-            }
-            await new Promise(r => setTimeout(r, Math.random() * 300 + 100));
-            try {
-                const current = JSON.parse(localStorage.getItem(CONFIG.keys.minuteLock) || '{}');
-                return current && current.minute === minute && current.tabId === tabId;
-            } catch {
-                return false;
-            }
-        }
-
         async sendToDiscord(webhookUrl, stats, statusElement) {
-            const gotGlobalLock = acquireGlobalSendLock();
-            if (!gotGlobalLock) {
-                if (statusElement) statusElement.innerHTML = '<span style="color: #ED4245;">⏳ A send already occurred this minute (duplicate suppressed)</span>';
-                return;
-            }
-
-            const wonMinute = await this.attemptMinuteLock();
-            if (!wonMinute) {
-                if (statusElement) {
-                    statusElement.innerHTML = '<span style="color: #ED4245;">⏳ A send already occurred this minute</span>';
-                }
-                return;
-            }
-
-            if (!IS_TAMPERMONKEY) {
-                if (window.__twDailyScheduler.inProgress) {
-                    if (statusElement) statusElement.innerHTML = '<span style="color: #ED4245;">❌ Send already in progress on this page</span>';
-                    throw new Error('Send already in progress on this page');
-                }
-                window.__twDailyScheduler.inProgress = true;
-            }
-
             const fields = [
                 { name: 'Player', value: '👤 ' + (stats.playerName || 'Unknown'), inline: false },
                 { name: 'World', value: '🌍 ' + (stats.world || 'Unknown'), inline: false },
@@ -627,7 +541,6 @@
             });
 
             const finalize = (success) => {
-                if (!IS_TAMPERMONKEY) window.__twDailyScheduler.inProgress = false;
                 if (success && statusElement) statusElement.innerHTML = '<span style="color: #57F287;">✅ Successfully sent to Discord!</span>';
             };
 
@@ -668,19 +581,30 @@
         }
 
         clearPageScheduler() {
-            try {
-                if (window.__twDailyScheduler.timeoutId) {
-                    clearTimeout(window.__twDailyScheduler.timeoutId);
-                    window.__twDailyScheduler.timeoutId = null;
-                }
-                if (window.__twDailyScheduler.intervalId) {
-                    clearInterval(window.__twDailyScheduler.intervalId);
-                    window.__twDailyScheduler.intervalId = null;
-                }
-                window.__twDailyScheduler.active = false;
-            } catch (e) {
-                console.error('Error clearing page scheduler', e);
-            }
+            if (window.__twDailyScheduler.timeoutId) clearTimeout(window.__twDailyScheduler.timeoutId);
+            if (window.__twDailyScheduler.intervalId) clearInterval(window.__twDailyScheduler.intervalId);
+            window.__twDailyScheduler.active = false;
+        }
+
+        // --- NEW LOGIC: SINGLE MASTER LOCK ---
+        async tryAcquireMasterLock() {
+            const today = new Date().toDateString();
+            const lastSent = localStorage.getItem(CONFIG.keys.lastAutoDate);
+            if (lastSent === today) return false; // Already sent today!
+
+            const myId = Math.random().toString(36).substring(7);
+            const now = Date.now();
+            
+            // 1. Propose myself as leader
+            const lockData = { id: myId, time: now };
+            localStorage.setItem(CONFIG.keys.masterLock, JSON.stringify(lockData));
+            
+            // 2. Wait a moment to see if someone overwrites me
+            await new Promise(r => setTimeout(r, 400));
+            
+            // 3. Check if I am still leader
+            const currentLock = JSON.parse(localStorage.getItem(CONFIG.keys.masterLock) || '{}');
+            return (currentLock.id === myId);
         }
 
         initAutoScheduler() {
@@ -693,38 +617,47 @@
                 return;
             }
 
-            if (!IS_TAMPERMONKEY) {
-                if (window.__twDailyScheduler.active) {
-                    console.log('Bookmarklet: scheduler already active - skipping init.');
-                    return;
-                }
-            }
-
             this.clearPageScheduler();
 
-            const now = new Date();
-            const delay = (60 - now.getSeconds()) * 1000;
-
-            window.__twDailyScheduler.timeoutId = setTimeout(() => {
-                const check = () => {
-                    const current = new Date();
-                    const currentStr = current.toTimeString().slice(0, 5);
-                    const lastSent = localStorage.getItem(CONFIG.keys.lastAutoDate);
-                    const today = current.toDateString();
-
-                    if (currentStr === time && lastSent !== today) {
-                        console.log('Mystery Inc: Auto-sending stats...');
-                        localStorage.setItem(CONFIG.keys.lastAutoDate, today);
-                        this.gatherStats().then(stats => {
+            const check = async () => {
+                const current = new Date();
+                const currentStr = current.toTimeString().slice(0, 5);
+                
+                // Only run if time matches exactly
+                if (currentStr === time) {
+                    const isLeader = await this.tryAcquireMasterLock();
+                    
+                    if (isLeader) {
+                        console.log('Mystery Inc: I am the leader. Sending daily stats...');
+                        const today = new Date().toDateString();
+                        localStorage.setItem(CONFIG.keys.lastAutoDate, today); // Mark as done immediately
+                        
+                        try {
+                            const stats = await this.gatherStats();
                             const url = localStorage.getItem(CONFIG.keys.webhook);
-                            if (url) this.sendToDiscord(url, stats, null);
-                        });
+                            if (url) await this.sendToDiscord(url, stats, null);
+                        } catch(e) {
+                            console.error("Auto-send failed", e);
+                            // Optional: Clear lastAutoDate if you want it to retry, 
+                            // but safer to skip to avoid loops.
+                        }
+                    } else {
+                        console.log('Mystery Inc: Another tab is handling the daily send.');
                     }
-                };
+                }
+            };
+
+            const now = new Date();
+            const seconds = now.getSeconds();
+            const delay = (60 - seconds) * 1000;
+
+            // Wait until next full minute, then check every 60s
+            window.__twDailyScheduler.timeoutId = setTimeout(() => {
                 check();
                 window.__twDailyScheduler.intervalId = setInterval(check, 60000);
-                window.__twDailyScheduler.active = true;
             }, delay);
+            
+            window.__twDailyScheduler.active = true;
         }
     }
 
