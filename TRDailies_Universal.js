@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mystery Inc. Dailies (v8.7 Fix)
+// @name         Mystery Inc. Dailies (v9.0 5-Min Cooldown)
 // @namespace    http://tampermonkey.net
-// @version      8.7
-// @description  Send daily farm, resource stats, and troop counts to Discord (Restored missing scheduler object)
+// @version      9.0
+// @description  Send daily farm, resource stats, and troop counts to Discord (Safe 5-minute cooldown prevents duplicates)
 // @author       Mystery Inc.
 // @match        https://*.tribalwars.com.pt/game.php*
 // @match        https://*.tribalwars.net/game.php*
@@ -20,7 +20,6 @@
     if (window.__twDailyInstanceActive) return;
     window.__twDailyInstanceActive = true;
 
-    // FIX: This was missing in v8.6, causing the "undefined" error!
     window.__twDailyScheduler = window.__twDailyScheduler || {
         timeoutId: null,
         intervalId: null,
@@ -28,13 +27,14 @@
     };
 
     const CONFIG = {
-        ver: '8.7',
+        ver: '9.0',
         keys: {
             version: 'tw_script_version',
             webhook: 'tw_discord_webhook',
             autoEnabled: 'tw_auto_send_enabled',
             autoTime: 'tw_auto_send_time',
-            lastAutoDate: 'tw_last_auto_send',
+            // Changed from storing "Date" to storing "Timestamp"
+            lastAutoTimestamp: 'tw_last_auto_ts',
             masterLock: 'tw_daily_master_lock'
         },
         icons: {
@@ -66,6 +66,8 @@
             if (lastVer !== CONFIG.ver) {
                 console.log(`Mystery Inc: Updated to v${CONFIG.ver}`);
                 localStorage.setItem(CONFIG.keys.version, CONFIG.ver);
+                // Clear old legacy keys if any
+                localStorage.removeItem('tw_last_auto_send');
             }
         }
 
@@ -198,6 +200,8 @@
             autoCheck.onchange = () => {
                 autoTime.disabled = !autoCheck.checked;
                 localStorage.setItem(CONFIG.keys.autoEnabled, autoCheck.checked);
+                // Changing toggle clears 5-min cooldown so you can test immediately
+                localStorage.removeItem(CONFIG.keys.lastAutoTimestamp);
                 if (autoCheck.checked) {
                     localStorage.setItem(CONFIG.keys.autoTime, autoTime.value);
                     this.initAutoScheduler();
@@ -208,6 +212,9 @@
 
             autoTime.onchange = () => {
                 localStorage.setItem(CONFIG.keys.autoTime, autoTime.value);
+                // Changing time clears 5-min cooldown immediately
+                localStorage.removeItem(CONFIG.keys.lastAutoTimestamp);
+                console.log('Mystery Inc: Time changed. Cooldown reset.');
                 if (autoCheck.checked) this.initAutoScheduler();
             };
 
@@ -394,7 +401,6 @@
             }
         }
 
-        // --- FORCE PAGE SIZE (v8.6+) ---
         async setPageSize(baseUrl, search, screen, mode) {
             if (typeof game_data === 'undefined' || !game_data.csrf) return;
             await this.sleepRandom(200, 400);
@@ -426,7 +432,6 @@
             }
 
             if (config.scavenging) {
-                // Scavenging World: Use Scavenge Mass Screen JSON
                 let page = 0, done = false;
                 while (!done && page < 20) {
                     try {
@@ -467,10 +472,7 @@
                     await this.sleepRandom(200, 400);
                 }
             } else {
-                // Non-Scavenging World: Use Overview > Units
-                // FORCE PAGE SIZE TO 1000
                 await this.setPageSize(baseUrl, search, 'overview_villages', 'units');
-
                 let page = 0, lastVillageId = null;
                 while (true) {
                     try {
@@ -613,13 +615,17 @@
         }
 
         async tryAcquireMasterLock() {
-            const today = new Date().toDateString();
-            const lastSent = localStorage.getItem(CONFIG.keys.lastAutoDate);
-            if (lastSent === today) return false;
-
-            const myId = Math.random().toString(36).substring(7);
+            // New 5-Minute Cooldown Logic
+            const lastSentTs = parseInt(localStorage.getItem(CONFIG.keys.lastAutoTimestamp) || '0');
             const now = Date.now();
             
+            // 5 minutes = 300,000 milliseconds
+            if ((now - lastSentTs) < 300000) {
+                console.log('Mystery Inc: Skipping auto-send (Cooldown active: 5 mins).');
+                return false;
+            }
+
+            const myId = Math.random().toString(36).substring(7);
             const lockData = { id: myId, time: now };
             localStorage.setItem(CONFIG.keys.masterLock, JSON.stringify(lockData));
             
@@ -646,19 +652,25 @@
                 const currentStr = current.toTimeString().slice(0, 5);
                 
                 if (currentStr === time) {
+                    console.log(`Mystery Inc: Timer fired at ${currentStr}. Checking locks...`);
                     const isLeader = await this.tryAcquireMasterLock();
                     
                     if (isLeader) {
-                        console.log('Mystery Inc: I am the leader. Sending daily stats...');
-                        const today = new Date().toDateString();
-                        localStorage.setItem(CONFIG.keys.lastAutoDate, today);
+                        console.log('Mystery Inc: I am the leader. Gathering daily stats...');
                         
                         try {
                             const stats = await this.gatherStats();
                             const url = localStorage.getItem(CONFIG.keys.webhook);
-                            if (url) await this.sendToDiscord(url, stats, null);
+                            if (url) {
+                                await this.sendToDiscord(url, stats, null);
+                                // Set timestamp lock for 5 minutes
+                                localStorage.setItem(CONFIG.keys.lastAutoTimestamp, Date.now());
+                                console.log('Mystery Inc: Stats sent. Cooldown active for 5 mins.');
+                            } else {
+                                console.error('Mystery Inc: Webhook URL missing during auto-send.');
+                            }
                         } catch(e) {
-                            console.error("Auto-send failed", e);
+                            console.error("Mystery Inc: Auto-send failed", e);
                         }
                     }
                 }
@@ -667,6 +679,8 @@
             const now = new Date();
             const seconds = now.getSeconds();
             const delay = (60 - seconds) * 1000;
+
+            console.log(`Mystery Inc: Auto-scheduler armed. Next check in ${Math.round(delay/1000)}s.`);
 
             window.__twDailyScheduler.timeoutId = setTimeout(() => {
                 check();
